@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quantitative-strategy-executionframework"
+version = "0.1.0"
+description = "Reusable execution-layer framework for exchange adapters, runtime state, and guarded notifications."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+  { name = "Open extraction" }
+]
+dependencies = []
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["exec_framework*"]

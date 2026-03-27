@@ -1,0 +1,33 @@
+[Unit]
+Description=Execution framework runtime template (replace with your strategy-specific entrypoint)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/quant-exec-framework
+EnvironmentFile=/opt/quant-exec-framework/secrets/binance_api.env
+ExecStart=/usr/bin/python3 -m your_runtime_worker_module --env /opt/quant-exec-framework/secrets/binance_api.env --daemon --readonly-market
+Restart=always
+RestartSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=runtime-worker
+
+# runtime artifacts are derived from LIVE_STATE_PATH in the env file.
+# Recommended:
+#   LIVE_STATE_PATH=/opt/quant-exec-framework/runtime/state.json
+# Derived paths:
+#   runtime_status.json -> same directory as LIVE_STATE_PATH
+#   event_log.jsonl     -> same directory as LIVE_STATE_PATH
+
+[Install]
+WantedBy=multi-user.target
+
+# NOTE: this public repository does not ship a strategy-specific runtime entrypoint.
+# Replace `your_runtime_worker_module` with your own orchestration module built on top of exec_framework/.

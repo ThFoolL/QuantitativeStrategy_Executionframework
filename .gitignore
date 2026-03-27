@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+.env
+.pytest_cache/
+.mypy_cache/
+.runtime/
+runtime/
+out/
+*.log
+*.lock
