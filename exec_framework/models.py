@@ -6,6 +6,16 @@ from typing import Any, Dict, List, Optional
 
 @dataclass
 class MarketSnapshot:
+    """Execution-layer market snapshot contract.
+
+    Note:
+    - This public schema intentionally allows private callers to attach strategy-specific
+      feature blobs via generic dict fields.
+    - Field names such as `signal_15m` / `trend_1h` / `rev_candidate` are legacy sample
+      placeholders from extraction time, not recommended public strategy conventions.
+    - New public integrations should treat these as opaque caller-owned payloads and may
+      replace them with neutral names in their own adapter layer.
+    """
     decision_ts: str
     bar_ts: str
     strategy_ts: Optional[str]
@@ -25,6 +35,15 @@ class MarketSnapshot:
 
 @dataclass
 class LiveStateSnapshot:
+    """Execution/runtime state snapshot shared across engine modules.
+
+    Boundary notes:
+    - Core execution fields are exchange/runtime/freeze/position facts.
+    - Some optional fields below are legacy caller-owned strategy state carried through the
+      execution layer for compatibility with the extracted private system.
+    - Public users should treat strategy thresholds / buckets / trigger parameters here as
+      opaque extension state, not framework recommendations or required defaults.
+    """
     state_ts: str
     consistency_status: str
     freeze_reason: Optional[str]
@@ -89,6 +108,12 @@ class LiveStateSnapshot:
 
 @dataclass
 class FinalActionPlan:
+    """Strategy-to-executor intent contract.
+
+    `target_strategy` and `conflict_context` are intentionally generic transport fields.
+    Public framework consumers should interpret them as caller-defined metadata rather than
+    built-in strategy taxonomy.
+    """
     plan_ts: str
     bar_ts: str
     action_type: str

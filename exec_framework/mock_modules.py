@@ -3,6 +3,7 @@ from __future__ import annotations
 from .models import ExecutionResult, FinalActionPlan, LiveStateSnapshot, MarketSnapshot
 
 
+# Legacy sample constant retained for local mock compatibility only.
 DEFAULT_LEVERAGE = 20.0
 # Only local strategy/control fields may flow from plan context into persisted state.
 STATE_UPDATE_WHITELIST = {
@@ -41,6 +42,10 @@ class InMemoryStateStore:
 
 
 class HoldStrategyModule:
+    """Minimal no-op planning stub for engine smoke tests.
+
+    This is not a public strategy example; it only satisfies the engine interface.
+    """
     def plan(self, market: MarketSnapshot, state: LiveStateSnapshot) -> FinalActionPlan:
         return FinalActionPlan(
             plan_ts=market.decision_ts,
@@ -61,6 +66,9 @@ class MockExecutorModule:
     - Real executor must not assume `plan -> filled -> persisted` in one step.
     - Real executor should confirm fills / position / average price / fees from exchange
       callbacks or reconciliation before writing final position state.
+    - Several state transitions below preserve legacy private-strategy semantics only so the
+      extracted public tests can keep running; they are compatibility scaffolding, not the
+      canonical behavior of the execution framework itself.
     """
 
     def _filter_state_patch(self, payload: dict | None) -> dict:
