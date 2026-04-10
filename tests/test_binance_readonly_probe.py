@@ -143,6 +143,12 @@ class BinanceReadonlyProbeCase(unittest.TestCase):
         self.assertEqual(info['status'], 401)
         self.assertEqual(info['code'], -2015)
 
+    def test_classify_error_does_not_mark_non_http_kind_as_auth_only_by_code(self):
+        err = RuntimeError(json.dumps({'kind': 'unexpected_error', 'status': None, 'payload': {'code': -2015, 'msg': 'Invalid API-key'}}))
+        info = _classify_error(err)
+        self.assertEqual(info['category'], 'unknown')
+        self.assertEqual(info['code'], -2015)
+
     def test_run_probe_output_is_sanitized(self):
         with tempfile.TemporaryDirectory() as tmp:
             env_path = Path(tmp) / 'binance_api.env'

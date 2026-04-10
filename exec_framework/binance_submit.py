@@ -318,7 +318,11 @@ class BinanceSignedSubmitClient:
             order_id=(str(payload['orderId']) if payload.get('orderId') is not None else None),
             client_order_id=payload.get('clientOrderId'),
             status=(str(payload['status']).upper() if payload.get('status') else None),
-            transact_time_ms=(int(payload['updateTime']) if payload.get('updateTime') is not None else None),
+            transact_time_ms=(
+                int(payload['transactTime'])
+                if payload.get('transactTime') is not None
+                else (int(payload['updateTime']) if payload.get('updateTime') is not None else None)
+            ),
             executed_qty=(float(payload['executedQty']) if payload.get('executedQty') not in (None, '') else None),
             avg_price=(float(payload['avgPrice']) if payload.get('avgPrice') not in (None, '') else None),
             raw=payload,
