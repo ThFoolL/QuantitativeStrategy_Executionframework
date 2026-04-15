@@ -1,0 +1,100 @@
+{
+  "collection_meta": {
+    "readonly_only": true,
+    "source_label": "live_readonly_capture",
+    "symbol": "ETHUSDT",
+    "sensitive_fields_removed": [
+      "orderId",
+      "clientOrderId",
+      "id",
+      "api_key",
+      "api_secret"
+    ],
+    "capture_method": "binance_readonly_sample_capture_v2",
+    "order_lookup": {
+      "requested": {
+        "order_id_masked": "838***35",
+        "client_order_id_masked": null
+      },
+      "resolved": {
+        "order_id_masked": "838***35",
+        "client_order_id_masked": null,
+        "source": "explicit_order_id"
+      },
+      "inference": null
+    },
+    "user_trades_source": {
+      "mode": "user_trades_by_order_id",
+      "requested_limit": 10,
+      "returned_count": 2,
+      "probe_window_count": 10
+    }
+  },
+  "order": {
+    "order_id_masked": "838***35",
+    "client_order_id_masked": "202***se",
+    "symbol": "ETHUSDT",
+    "status": "FILLED",
+    "type": "MARKET",
+    "side": "BUY",
+    "positionSide": "BOTH",
+    "origQty": "0.010",
+    "executedQty": "0.010",
+    "price": "0.00",
+    "avgPrice": "2330.17000",
+    "reduceOnly": true,
+    "closePosition": false,
+    "updateTime": 1776264337534
+  },
+  "user_trades": [
+    {
+      "trade_id_masked": "798***69",
+      "order_id_masked": "838***35",
+      "client_order_id_masked": null,
+      "symbol": "ETHUSDT",
+      "side": "BUY",
+      "positionSide": "BOTH",
+      "qty": "0.009",
+      "price": "2330.17",
+      "commission": "0.01048576",
+      "commissionAsset": "USDT",
+      "realizedPnl": "-0.01269000",
+      "maker": false,
+      "buyer": true,
+      "time": 1776264337534
+    },
+    {
+      "trade_id_masked": "798***70",
+      "order_id_masked": "838***35",
+      "client_order_id_masked": null,
+      "symbol": "ETHUSDT",
+      "side": "BUY",
+      "positionSide": "BOTH",
+      "qty": "0.001",
+      "price": "2330.17",
+      "commission": "0.00116508",
+      "commissionAsset": "USDT",
+      "realizedPnl": "-0.00141000",
+      "maker": false,
+      "buyer": true,
+      "time": 1776264337534
+    }
+  ],
+  "position_risk": [
+    {
+      "symbol": "ETHUSDT",
+      "positionSide": "BOTH",
+      "positionAmt": "0.000",
+      "entryPrice": "0.0",
+      "breakEvenPrice": "0.0",
+      "markPrice": "2337.00000000",
+      "unRealizedProfit": "0.00000000",
+      "marginType": "cross",
+      "leverage": "50",
+      "isolatedMargin": "0.00000000",
+      "liquidationPrice": "0",
+      "updateTime": 1776264470622
+    }
+  ],
+  "open_orders": []
+}
