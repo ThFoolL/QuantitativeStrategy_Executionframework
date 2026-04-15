@@ -58,6 +58,92 @@
   - `tests.test_runtime_status_runtime_like_views`
   - `tests.test_manual_protective_missing_emergency_close_probe`
 
+### Lingering protective cleanup after flat
+
+- Sample: `docs/deploy_v6c/samples/manual_lingering_protective_cleanup/20260415T210722861796Z/20260415T210722861796Z_ETHUSDT_lingering_protective_cleanup_summary.json`
+- Result: passed.
+- Covered:
+  - real entry
+  - closePosition protective order left behind after manual reduce-only close to flat
+  - runtime cleanup path cancels lingering protective order
+  - final exchange state flat/open_orders=0
+- Regression:
+  - `tests.test_manual_lingering_protective_cleanup_probe`
+  - `tests.test_runtime_worker_autonomous`
+
+### Submit auto-repair (-1021 / -2022)
+
+- Checklist item: #8.
+- Result: controlled non-live validation passed.
+- Reason for non-live validation:
+  - `-1021` requires deliberately invalid signed timestamps / recvWindow behavior.
+  - `-2022` requires deliberately creating reduce-only conflict conditions.
+  - Both are unsafe and noisy to force repeatedly in live small-capital probes.
+- Covered by focused regression:
+  - `tests.test_binance_exception_policy`
+  - `tests.test_binance_exception_helpers`
+  - `tests.test_async_operation_protection_followup`
+  - `tests.test_executor_real_submit_gate`
+  - `tests.test_runtime_guard_readonly_recheck`
+- Verified command:
+
+```bash
+python3 -m unittest \
+  tests.test_binance_exception_policy \
+  tests.test_binance_exception_helpers \
+  tests.test_async_operation_protection_followup \
+  tests.test_executor_real_submit_gate \
+  tests.test_runtime_guard_readonly_recheck
+```
+
+Result: `Ran 119 tests ... OK`.
+
+### Multi-active async arbitration and history lifecycle
+
+- Checklist items: #9 and #10.
+- Result: controlled state-machine validation passed.
+- Reason for non-live validation:
+  - Multi-active arbitration and history migration are runtime state-machine invariants, not exchange behaviors.
+  - Forcing overlapping `execution_confirm` / `protection_followup` / `submit_auto_repair` families live would create unnecessary order risk and does not add exchange-side evidence.
+- Covered:
+  - active operation priority: `submit_auto_repair` > `protection_followup` > `execution_confirm`
+  - stale operation superseding
+  - terminal migration into `async_operations.history`
+  - lifecycle statuses: `succeeded`, `failed`, `exhausted`, `cancelled`, `superseded`
+- Verified command:
+
+```bash
+python3 -m unittest \
+  tests.test_async_operation_protection_followup \
+  tests.test_runtime_guard_readonly_recheck \
+  tests.test_runtime_worker_readonly_recheck
+```
+
+Result: `Ran 76 tests ... OK`.
+
+### Freeze / recover operator consistency
+
+- Checklist item: #11.
+- Result: controlled runtime/status validation passed, backed by live samples from #5/#6/#7 and partial-missing probes.
+- Covered:
+  - emergency close facts are preserved in operator summary via effective `recover_timeline` selection
+  - `protective_order_missing` + `FORCE_CLOSE` is not hidden by later terminal confirmation
+  - `partial_protective_missing` maps to explicit `protection_tp_missing` / `protection_stop_missing`
+  - runtime guard and status CLI report aligned stop reasons / stop conditions
+- Verified command:
+
+```bash
+python3 -m unittest \
+  tests.test_runtime_status_runtime_like_views \
+  tests.test_runtime_status_cli_readonly_recheck \
+  tests.test_runtime_guard_readonly_recheck \
+  tests.test_runtime_worker_autonomous \
+  tests.test_manual_protective_missing_emergency_close_probe \
+  tests.test_manual_partial_protective_missing_probe
+```
+
+Result: `Ran 75 tests ... OK`.
+
 ## Real Samples Captured / Fixed In Tests
 
 ### Split-fill trade rows
@@ -153,3 +239,46 @@ Latest readonly probe during this work showed:
 - `nonzero_position_count=0`
 
 No live position was left open after the probes.
+
+## Final Checklist Closure - 2026-04-16
+
+The remaining original checklist items have now been closed as follows:
+
+- #7 `cleanup lingering protective`: real probe passed with `manual_lingering_protective_cleanup_probe`.
+- #8 `submit auto-repair`: controlled non-live validation passed for timestamp/reduce-only exception handling.
+- #9 `multi-active async arbitration`: controlled state-machine regression passed.
+- #10 `async history lifecycle`: controlled state-machine regression passed.
+- #11 `freeze/recover operator consistency`: controlled runtime/status validation passed, backed by live samples.
+- #12 final exchange safety closure: readonly probe confirmed flat/open_orders=0.
+
+Final checklist closure command:
+
+```bash
+python3 -m unittest \
+  tests.test_binance_time_sync \
+  tests.test_reconcile_protective_orders \
+  tests.test_runtime_status_runtime_like_views \
+  tests.test_posttrade_confirm_classification \
+  tests.test_position_fact_reconciler \
+  tests.test_runtime_worker_autonomous \
+  tests.test_runtime_worker_readonly_recheck \
+  tests.test_async_operation_protection_followup \
+  tests.test_async_position_confirmed_writeback \
+  tests.test_runtime_guard_readonly_recheck \
+  tests.test_runtime_status_cli_readonly_recheck \
+  tests.test_manual_lingering_protective_cleanup_probe \
+  tests.test_manual_partial_protective_missing_probe \
+  tests.test_manual_protective_missing_emergency_close_probe \
+  tests.test_manual_protection_semantic_mismatch_probe \
+  tests.test_manual_query_mismatch_probe \
+  tests.test_manual_reduce_only_not_flat_probe \
+  tests.test_manual_filled_with_residual_open_order_probe
+```
+
+Result: `Ran 183 tests ... OK`.
+
+Final exchange safety probe:
+
+- `position=0`
+- `open_orders=0`
+- `nonzero_position_count=0`
