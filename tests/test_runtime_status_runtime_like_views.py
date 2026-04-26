@@ -180,6 +180,123 @@ class RuntimeStatusRuntimeLikeViewsCase(unittest.TestCase):
         self.assertIn('继续只读观察', summary['operator_compact_view']['next_focus'])
         self.assertEqual(summary['operator_compact_view']['stop_condition'], 'position_confirmed_but_protection_pending')
 
+    def test_negative_management_recover_projection_sanitized_in_runtime_like_view(self) -> None:
+        runtime_status_path = self._write_runtime_files(
+            runtime_status={
+                'phase': 'completed',
+                'symbol': 'ETHUSDT',
+                'dry_run': False,
+                'submit_enabled': True,
+                'latest_market_summary': {'bar_ts': '2026-04-26T13:15:00+00:00'},
+                'latest_result_summary': {
+                    'runtime_mode': 'ACTIVE',
+                    'freeze_status': 'NONE',
+                    'freeze_reason': None,
+                    'result_status': 'RECOVERED',
+                    'confirmation_status': 'CONFIRMED',
+                    'execution_phase': 'confirmed',
+                },
+                'recover_check': {
+                    'source': 'protective_order_recover',
+                    'result': 'RECOVERED',
+                    'allowed': True,
+                    'reason': 'CANCEL_USING_EXCHANGE_FACTS',
+                    'recover_ready': True,
+                    'recover_policy': 'recover_ready',
+                    'recover_stage': 'recover_ready',
+                    'stop_reason': 'success_protective_visible',
+                    'stop_condition': 'protective_order_visible_on_exchange',
+                    'remaining_risk': 'replace_invalid_protective_orders',
+                    'result_detail': 'CANCEL_USING_EXCHANGE_FACTS',
+                    'attempts': [{'step': 'protective_rebuild_validate', 'result': 'invalid'}],
+                },
+                'recover_timeline': [
+                    {
+                        'source': 'protective_order_recover',
+                        'result': 'RECOVERED',
+                        'allowed': True,
+                        'reason': 'CANCEL_USING_EXCHANGE_FACTS',
+                        'recover_ready': True,
+                        'recover_policy': 'recover_ready',
+                        'recover_stage': 'recover_ready',
+                        'stop_reason': 'success_protective_visible',
+                        'stop_condition': 'protective_order_visible_on_exchange',
+                        'remaining_risk': 'replace_invalid_protective_orders',
+                        'result_detail': 'CANCEL_USING_EXCHANGE_FACTS',
+                        'attempts': [{'step': 'protective_rebuild_validate', 'result': 'invalid'}],
+                    }
+                ],
+            },
+            state={
+                'state': {
+                    'state_ts': '2026-04-26T13:15:10+00:00',
+                    'consistency_status': 'OK',
+                    'freeze_reason': None,
+                    'runtime_mode': 'ACTIVE',
+                    'freeze_status': 'NONE',
+                    'pending_execution_phase': None,
+                    'exchange_position_side': 'long',
+                    'exchange_position_qty': 0.021,
+                    'exchange_entry_price': 2330.0,
+                    'active_strategy': 'trend',
+                    'active_side': 'long',
+                    'protective_order_status': 'ACTIVE',
+                    'recover_check': {
+                        'source': 'protective_order_recover',
+                        'result': 'RECOVERED',
+                        'allowed': True,
+                        'reason': 'CANCEL_USING_EXCHANGE_FACTS',
+                        'recover_ready': True,
+                        'recover_policy': 'recover_ready',
+                        'recover_stage': 'recover_ready',
+                        'stop_reason': 'success_protective_visible',
+                        'stop_condition': 'protective_order_visible_on_exchange',
+                        'remaining_risk': 'replace_invalid_protective_orders',
+                        'result_detail': 'CANCEL_USING_EXCHANGE_FACTS',
+                        'attempts': [{'step': 'protective_rebuild_validate', 'result': 'invalid'}],
+                    },
+                    'recover_timeline': [
+                        {
+                            'source': 'protective_order_recover',
+                            'result': 'RECOVERED',
+                            'allowed': True,
+                            'reason': 'CANCEL_USING_EXCHANGE_FACTS',
+                            'recover_ready': True,
+                            'recover_policy': 'recover_ready',
+                            'recover_stage': 'recover_ready',
+                            'stop_reason': 'success_protective_visible',
+                            'stop_condition': 'protective_order_visible_on_exchange',
+                            'remaining_risk': 'replace_invalid_protective_orders',
+                            'result_detail': 'CANCEL_USING_EXCHANGE_FACTS',
+                            'attempts': [{'step': 'protective_rebuild_validate', 'result': 'invalid'}],
+                        }
+                    ],
+                },
+                'last_result': {
+                    'trade_summary': {
+                        'protective_validation': {
+                            'validation_level': 'MISMATCH',
+                            'summary': {'submit_readback_empty': True},
+                        }
+                    }
+                },
+            },
+            event_rows=[
+                {
+                    'event_type': 'recover_result',
+                    'result': 'RECOVERED',
+                    'stop_reason': 'success_protective_visible',
+                    'remaining_risk': 'replace_invalid_protective_orders',
+                    'result_detail': 'CANCEL_USING_EXCHANGE_FACTS',
+                    'attempts': [{'step': 'protective_rebuild_validate', 'result': 'invalid'}],
+                }
+            ],
+        )
+        summary = build_runtime_status_summary(runtime_status_path=runtime_status_path)
+        self.assertEqual(summary['recover_summary']['recover_policy'], 'manual_review')
+        self.assertEqual(summary['recover_summary']['recover_stage'], 'recover_review_required')
+        self.assertEqual(summary['operator_compact_view']['stop_condition'], 'protective_rebuild_negative_projection')
+
     def test_force_close_recover_timeline_keeps_operator_summary_on_emergency_fact(self) -> None:
         runtime_status_path = self._write_runtime_files(
             runtime_status={

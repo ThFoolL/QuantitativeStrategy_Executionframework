@@ -24,6 +24,22 @@ class StubReadonlyClient:
     def get_exchange_info(self, symbol):
         return StubRules()
 
+    def get_open_orders(self, symbol=None, order_ids=None, client_order_ids=None):
+        return []
+
+    def get_algo_open_orders(self, symbol=None, order_ids=None):
+        return []
+
+    def get_position_risk(self, symbol):
+        return []
+
+    def get_position_snapshot(self, symbol):
+        class _Pos:
+            side = None
+            qty = 0.0
+            entry_price = None
+        return _Pos()
+
 
 class ExecutorSubmitGateCase(unittest.TestCase):
     def make_market(self) -> MarketSnapshot:
@@ -118,13 +134,14 @@ class ExecutorSubmitGateCase(unittest.TestCase):
         self.assertEqual(payload['quantity'], 0.015)
         self.assertNotIn('reduceOnly', payload)
 
-    def test_submit_orders_raises_when_gate_open_but_http_not_implemented(self) -> None:
+    def test_submit_orders_returns_receipts_when_gate_open(self) -> None:
         config = BinanceEnvConfig(
             api_key='k',
             api_secret='s',
             symbol='ETHUSDT',
             dry_run=False,
             submit_enabled=True,
+            submit_http_post_enabled=True,
             submit_unlock_token=BINANCE_LIVE_SUBMIT_UNLOCK_TOKEN,
             submit_symbol_allowlist=('ETHUSDT',),
             submit_max_qty=0.02,
@@ -133,22 +150,22 @@ class ExecutorSubmitGateCase(unittest.TestCase):
             submit_manual_ack_token=LIVE_SUBMIT_MANUAL_ACK_TOKEN,
         )
         executor = BinanceRealExecutor(config=config, readonly_client=StubReadonlyClient())
-        with self.assertRaises(NotImplementedError) as ctx:
-            executor._submit_orders(
-                [
-                    BinanceOrderRequest(
-                        symbol='BTCUSDT',
-                        side='BUY',
-                        order_type='MARKET',
-                        quantity=0.01,
-                        reduce_only=False,
-                        position_side=None,
-                        client_order_id='cid-2',
-                        metadata={},
-                    )
-                ]
-            )
-        self.assertIn('intentionally unreachable', str(ctx.exception))
+        receipts = executor._submit_orders(
+            [
+                BinanceOrderRequest(
+                    symbol='ETHUSDT',
+                    side='BUY',
+                    order_type='MARKET',
+                    quantity=0.01,
+                    reduce_only=False,
+                    position_side=None,
+                    client_order_id='cid-2',
+                    metadata={},
+                )
+            ]
+        )
+        self.assertEqual(len(receipts), 1)
+        self.assertEqual(receipts[0].submit_status, 'ERROR')
 
     def test_submit_exception_metadata_shape_is_stable_for_upstream(self) -> None:
         config = BinanceEnvConfig(
@@ -156,6 +173,7 @@ class ExecutorSubmitGateCase(unittest.TestCase):
             api_secret='s',
             dry_run=False,
             submit_enabled=True,
+            submit_http_post_enabled=True,
             submit_unlock_token=BINANCE_LIVE_SUBMIT_UNLOCK_TOKEN,
             submit_symbol_allowlist=('BTCUSDT',),
             submit_max_qty=0.02,
@@ -181,11 +199,9 @@ class ExecutorSubmitGateCase(unittest.TestCase):
 
         executor.submit_client.submit_order = _raise_submit  # type: ignore[method-assign]
 
-        with self.assertRaises(NotImplementedError) as ctx:
-            executor._submit_orders([request])
-        text = str(ctx.exception)
-        self.assertIn('policy_action=readonly_recheck', text)
-        self.assertIn('policy_alert=on_exhausted_retry_or_unresolved', text)
+        receipts = executor._submit_orders([request])
+        self.assertEqual(len(receipts), 1)
+        self.assertEqual(receipts[0].submit_status, 'ERROR')
 
         metadata = executor._build_submit_exception_metadata(
             category='network_timeout',
@@ -323,6 +339,55 @@ class ExecutorSubmitGateCase(unittest.TestCase):
         gate = executor._evaluate_submit_gate(market=self.make_market(), state=state, order_requests=requests)
         self.assertFalse(gate['submit_allowed'])
         self.assertIn('pending_execution_phase:submitted', gate['guardrail_blockers'])
+
+    def test_pretrade_recover_invalid_replace_risk_does_not_project_success_protective_visible(self) -> None:
+        config = BinanceEnvConfig(
+            api_key='k', api_secret='s', dry_run=False, submit_enabled=True,
+            submit_unlock_token=BINANCE_LIVE_SUBMIT_UNLOCK_TOKEN, submit_symbol_allowlist=('ETHUSDT',),
+            submit_max_qty=10.0, submit_max_notional=1_000_000.0, discord_audit_enabled=True,
+            submit_manual_ack_token=LIVE_SUBMIT_MANUAL_ACK_TOKEN,
+        )
+        executor = BinanceRealExecutor(config=config, readonly_client=StubReadonlyClient())
+        recover = {
+            'result': 'VALID_ON_EXCHANGE',
+            'remaining_risk': 'replace_invalid_protective_orders',
+            'attempts': [
+                {'step': 'protective_rebuild_validate', 'result': 'invalid'},
+            ],
+            'state_updates': {
+                'exchange_protective_orders': [{'kind': 'take_profit', 'stop_price': 2150.0}],
+                'protective_order_status': 'ACTIVE',
+            },
+            'validation': {
+                'status': 'MISMATCH',
+                'validation_level': 'MISMATCH',
+                'summary': {'submit_readback_empty': True},
+            },
+        }
+        state = self.make_state()
+        state.exchange_position_side = 'long'
+        state.exchange_position_qty = 0.01
+        plan = FinalActionPlan(
+            plan_ts='2026-04-15T10:29:30+00:00', bar_ts='2026-04-15T10:25:00+00:00', action_type='protective_rebuild',
+            target_strategy='trend', target_side='long', reason='repair_protection', qty_mode='exchange_position', qty=0.01, stop_price=2050.0,
+            requires_execution=True,
+        )
+        updates = executor._build_protective_recover_state_updates(
+            state=state,
+            market=MarketSnapshot(
+                decision_ts='2026-04-15T10:29:30+00:00', bar_ts='2026-04-15T10:25:00+00:00', strategy_ts=None,
+                execution_attributed_bar=None, symbol='ETHUSDT', preclose_offset_seconds=27, current_price=2100.0, source_status='OK'
+            ),
+            plan=plan,
+            recover=recover,
+            result='VALID_ON_EXCHANGE',
+            reason='VALID_ON_EXCHANGE',
+            allowed=True,
+        )
+        recover_check = updates['recover_check']
+        self.assertNotEqual(recover_check.get('stop_reason'), 'success_protective_visible')
+        self.assertNotEqual(recover_check.get('recover_stage'), 'recover_ready')
+        self.assertNotEqual(recover_check.get('remaining_risk'), 'none')
 
 
 if __name__ == '__main__':

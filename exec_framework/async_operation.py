@@ -111,6 +111,21 @@ _EXHAUSTED_STOP_REASONS = {
 _EXHAUSTED_STOP_CONDITIONS = {
     STOP_CONDITION_SHARED_BUDGET_EXHAUSTED,
 }
+_NEGATIVE_PROTECTIVE_VALIDATION_LEVELS = {
+    'INVALID',
+    'MISMATCH',
+    'MISSING',
+    'STRUCTURAL_MISMATCH',
+    'SEMANTIC_MISMATCH',
+}
+_NEGATIVE_PROTECTIVE_RECOVER_RISKS = {
+    'replace_invalid_protective_orders',
+    'cannot_safely_cancel_existing_protective_orders',
+    'await_submit_and_posttrade_confirmation',
+    'will_replace_existing_protective_orders_during_submit',
+    'position_open_without_protection',
+    'unclassified_protective_order_state',
+}
 
 
 def build_protection_followup_async_operation(
@@ -721,6 +736,30 @@ def _derive_attempt_outcome(
     return 'pending_submit'
 
 
+def _has_negative_protective_recover_fact(
+    *,
+    trade_summary: dict[str, Any],
+    protective_validation: dict[str, Any],
+) -> bool:
+    validation_level = str(protective_validation.get('validation_level') or protective_validation.get('status') or '').upper()
+    if validation_level in _NEGATIVE_PROTECTIVE_VALIDATION_LEVELS:
+        return True
+
+    validation_summary = dict(protective_validation.get('summary') or {})
+    if bool(validation_summary.get('submit_readback_empty')):
+        return True
+
+    protective_recover = dict(trade_summary.get('protective_recover') or {})
+    remaining_risk = str(protective_recover.get('remaining_risk') or '').strip()
+    if remaining_risk in _NEGATIVE_PROTECTIVE_RECOVER_RISKS:
+        return True
+
+    for attempt in list(protective_recover.get('attempts') or []):
+        if str((attempt or {}).get('step') or '') == 'protective_rebuild_validate' and str((attempt or {}).get('result') or '') == 'invalid':
+            return True
+    return False
+
+
 def _derive_operation_stop(
     *,
     trigger_phase: str | None,
@@ -750,6 +789,11 @@ def _derive_operation_stop(
     protective_validation = dict(trade_summary.get('protective_validation') or {})
     if not protective_validation:
         protective_validation = dict(result_payload.get('protective_validation') or {})
+    if _has_negative_protective_recover_fact(
+        trade_summary=trade_summary,
+        protective_validation=protective_validation,
+    ):
+        return 'protective_rebuild_negative_projection', 'protective_rebuild_negative_projection'
     freeze_reason = (
         result_payload.get('freeze_reason')
         or protective_validation.get('freeze_reason')

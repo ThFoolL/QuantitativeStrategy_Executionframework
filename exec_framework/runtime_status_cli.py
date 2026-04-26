@@ -346,6 +346,68 @@ def _build_retry_budget_summary(confirm_context: dict[str, Any] | None, readonly
     }
 
 
+_NEGATIVE_PROTECTIVE_RECOVER_RISKS = {
+    'replace_invalid_protective_orders',
+    'will_replace_existing_protective_orders_during_submit',
+    'position_open_without_protection',
+    'cannot_safely_cancel_existing_protective_orders',
+}
+_NEGATIVE_PROTECTIVE_VALIDATION_LEVELS = {
+    'MISMATCH',
+    'STRUCTURAL_MISMATCH',
+    'SEMANTIC_MISMATCH',
+    'MISSING',
+    'INVALID',
+}
+
+
+def _recover_record_has_negative_management_projection(record: dict[str, Any] | None) -> bool:
+    if not isinstance(record, dict) or not record:
+        return False
+    remaining_risk = str(record.get('remaining_risk') or '').strip()
+    if remaining_risk in _NEGATIVE_PROTECTIVE_RECOVER_RISKS:
+        return True
+    result_detail = str(record.get('result_detail') or '').strip()
+    if result_detail == 'CANCEL_USING_EXCHANGE_FACTS':
+        return True
+    validation_level = str(record.get('validation_level') or '').upper()
+    if validation_level in _NEGATIVE_PROTECTIVE_VALIDATION_LEVELS:
+        return True
+    for attempt in list(record.get('attempts') or []):
+        if str((attempt or {}).get('step') or '') == 'protective_rebuild_validate' and str((attempt or {}).get('result') or '') == 'invalid':
+            return True
+    return False
+
+
+def _sanitize_negative_management_recover_record(record: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(record, dict):
+        return record
+    sanitized = dict(record)
+    if not _recover_record_has_negative_management_projection(sanitized):
+        return sanitized
+    sanitized['allowed'] = False
+    sanitized['recover_ready'] = False
+    sanitized['requires_manual_resume'] = True
+    sanitized['recover_policy'] = 'manual_review'
+    sanitized['recover_policy_display'] = 'manual_review'
+    sanitized['legacy_recover_policy'] = 'manual_review'
+    sanitized['recover_stage'] = 'recover_review_required'
+    sanitized['stop_category'] = 'manual_review'
+    sanitized['stop_condition'] = 'protective_rebuild_negative_projection'
+    sanitized['stop_reason'] = str(sanitized.get('reason') or sanitized.get('result_detail') or 'protective_rebuild_negative_projection')
+    sanitized['freeze_reason'] = str(sanitized.get('freeze_reason') or sanitized.get('remaining_risk') or sanitized['stop_reason'])
+    sanitized['guard_decision'] = 'keep_frozen_negative_protective_projection'
+    sanitized['risk_action'] = 'MANUAL_REVIEW'
+    return sanitized
+
+
+def _sanitize_negative_management_recover_timeline(timeline: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    return [
+        _sanitize_negative_management_recover_record(item) if isinstance(item, dict) else item
+        for item in list(timeline or [])
+    ]
+
+
 def _resolve_protection_projection(*, stop_condition: str | None, recover_check: dict[str, Any] | None, position: dict[str, Any], confirm_summary: dict[str, Any]) -> dict[str, Any]:
     recover_check = dict(recover_check or {})
     protection_intent = dict(position.get('strategy_protection_intent') or {})
@@ -397,7 +459,7 @@ def _resolve_protection_projection(*, stop_condition: str | None, recover_check:
 
 
 def _select_effective_recover_check(recover_check: dict[str, Any] | None, recover_timeline: list[dict[str, Any]] | None) -> dict[str, Any]:
-    current = dict(recover_check or {})
+    current = _sanitize_negative_management_recover_record(dict(recover_check or {}))
     for row in reversed(list(recover_timeline or [])):
         candidate = dict(row or {})
         if not candidate:
@@ -1174,8 +1236,12 @@ def build_runtime_status_summary(
         'execution_retry_backoff': state.get('execution_retry_backoff') or {},
     }
 
-    recover_check = runtime_status.get('recover_check') or state.get('recover_check') or state_payload.get('recover_check')
-    recover_timeline = runtime_status.get('recover_timeline') or state.get('recover_timeline') or state_payload.get('recover_timeline') or []
+    recover_check = _sanitize_negative_management_recover_record(
+        runtime_status.get('recover_check') or state.get('recover_check') or state_payload.get('recover_check')
+    )
+    recover_timeline = _sanitize_negative_management_recover_timeline(
+        runtime_status.get('recover_timeline') or state.get('recover_timeline') or state_payload.get('recover_timeline') or []
+    )
     recover_check = _select_effective_recover_check(recover_check, recover_timeline)
 
     runtime_config_validation = runtime_status.get('runtime_config_validation')

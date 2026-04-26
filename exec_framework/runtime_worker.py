@@ -2372,8 +2372,15 @@ class RuntimeWorker:
             recover_check.setdefault('legacy_recover_policy', recover_check.get('recover_policy'))
         protective_validation = dict((result_payload.get('trade_summary') or {}).get('protective_validation') or {})
         protective_visibility = dict(protective_validation.get('exchange_visibility') or {})
+        protective_recover_summary = dict((result_payload.get('trade_summary') or {}).get('protective_recover') or {})
+        has_negative_recover_fact = BinanceRealExecutor._protective_recover_has_negative_fact(
+            recover=protective_recover_summary,
+            protective_validation=protective_validation,
+            submit_readback_empty=bool(dict(protective_validation.get('summary') or {}).get('submit_readback_empty')),
+        )
         positive_protective_fact = bool(
-            protective_validation.get('ok')
+            not has_negative_recover_fact
+            and protective_validation.get('ok')
             and (
                 protective_visibility.get('confirmed_via_exchange_visibility')
                 or protective_visibility.get('exchange_visible')
@@ -2424,8 +2431,15 @@ class RuntimeWorker:
         state_updates.update(decision.state_updates)
         protective_validation = dict((result_payload.get('trade_summary') or {}).get('protective_validation') or {})
         protective_visibility = dict(protective_validation.get('exchange_visibility') or {})
+        protective_recover_summary = dict((result_payload.get('trade_summary') or {}).get('protective_recover') or {})
+        has_negative_recover_fact = BinanceRealExecutor._protective_recover_has_negative_fact(
+            recover=protective_recover_summary,
+            protective_validation=protective_validation,
+            submit_readback_empty=bool(dict(protective_validation.get('summary') or {}).get('submit_readback_empty')),
+        )
         positive_protective_fact = bool(
-            protective_validation.get('ok')
+            not has_negative_recover_fact
+            and protective_validation.get('ok')
             and (
                 protective_visibility.get('confirmed_via_exchange_visibility')
                 or protective_visibility.get('exchange_visible')

@@ -43,6 +43,23 @@ from .runtime_guard import (
 from .unified_risk_action import classify_reconcile_risk
 
 
+_NEGATIVE_PROTECTIVE_VALIDATION_LEVELS = {
+    'INVALID',
+    'MISMATCH',
+    'MISSING',
+    'STRUCTURAL_MISMATCH',
+    'SEMANTIC_MISMATCH',
+}
+_NEGATIVE_PROTECTIVE_RECOVER_RISKS = {
+    'replace_invalid_protective_orders',
+    'cannot_safely_cancel_existing_protective_orders',
+    'await_submit_and_posttrade_confirmation',
+    'will_replace_existing_protective_orders_during_submit',
+    'position_open_without_protection',
+    'unclassified_protective_order_state',
+}
+
+
 @dataclass(frozen=True)
 class BinanceCancelOrderRequest:
     symbol: str
@@ -982,6 +999,28 @@ class BinanceRealExecutor:
             'summary': dict(validation.summary),
         }
 
+    @staticmethod
+    def _protective_recover_has_negative_fact(
+        *,
+        recover: dict[str, Any] | None,
+        protective_validation: dict[str, Any] | None,
+        submit_readback_empty: bool,
+    ) -> bool:
+        recover = dict(recover or {})
+        protective_validation = dict(protective_validation or {})
+        validation_level = str(protective_validation.get('validation_level') or protective_validation.get('status') or '').upper()
+        if validation_level in _NEGATIVE_PROTECTIVE_VALIDATION_LEVELS:
+            return True
+        if submit_readback_empty:
+            return True
+        remaining_risk = str(recover.get('remaining_risk') or '').strip()
+        if remaining_risk in _NEGATIVE_PROTECTIVE_RECOVER_RISKS:
+            return True
+        for attempt in list(recover.get('attempts') or []):
+            if str((attempt or {}).get('step') or '') == 'protective_rebuild_validate' and str((attempt or {}).get('result') or '') == 'invalid':
+                return True
+        return False
+
     def _build_protective_recover_state_updates(
         self,
         *,
@@ -1033,8 +1072,16 @@ class BinanceRealExecutor:
             'position_fact': position_fact,
         }
         effective_snapshot = dict(recover.get('effective_exchange_snapshot') or {})
+        protective_validation = dict(recover.get('validation') or {})
+        submit_readback_empty = bool(dict(protective_validation.get('summary') or {}).get('submit_readback_empty'))
+        negative_recover_fact = self._protective_recover_has_negative_fact(
+            recover=recover,
+            protective_validation=protective_validation,
+            submit_readback_empty=submit_readback_empty,
+        )
         positive_recover_fact = bool(
             effective_allowed
+            and not negative_recover_fact
             and result in {'VALID_ON_EXCHANGE', 'STATE_REBUILT'}
             and len(list(state_updates.get('exchange_protective_orders') or effective_snapshot.get('protective_orders') or [])) >= 1
         )
