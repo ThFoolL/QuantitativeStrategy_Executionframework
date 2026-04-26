@@ -206,6 +206,17 @@ def reconcile_pre_run(payload: ReconcileInput) -> ReconcileDecision:
         protective_open_orders,
     )
     notes.extend(protective_notes)
+    positive_exchange_protective_fact = bool(
+        exchange_side in {'long', 'short'}
+        and exchange_qty > payload.qty_tolerance
+        and any(
+            bool(getattr(order, 'close_position', None))
+            and str(getattr(order, 'status', None) or '').upper() in PENDING_ORDER_STATUSES
+            for order in protective_open_orders
+        )
+    )
+    if positive_exchange_protective_fact:
+        notes.append('exchange_protective_fact_visible')
     if (
         not management_stop_update_pending
         and exchange_side in {'long', 'short'}
@@ -233,14 +244,17 @@ def reconcile_pre_run(payload: ReconcileInput) -> ReconcileDecision:
         protective_freeze_reason = None
 
     if state.freeze_reason and state.consistency_status == RECONCILE_FREEZE:
-        notes.append('existing_freeze_state')
-        return _decision(
-            status=RECONCILE_FREEZE,
-            freeze_reason=state.freeze_reason,
-            can_open_new_position=False,
-            can_modify_position=False,
-            open_order_ids=pending_ids,
-        )
+        if positive_exchange_protective_fact and state.freeze_reason == 'protective_order_missing':
+            notes.append('stale_protective_missing_overridden_by_exchange_fact')
+        else:
+            notes.append('existing_freeze_state')
+            return _decision(
+                status=RECONCILE_FREEZE,
+                freeze_reason=state.freeze_reason,
+                can_open_new_position=False,
+                can_modify_position=False,
+                open_order_ids=pending_ids,
+            )
 
     if not protective_ok:
         notes.append('protective_orders_invalid')

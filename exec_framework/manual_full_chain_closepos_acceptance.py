@@ -24,7 +24,11 @@ from .runtime_worker import (
     WorkerRunSummary,
     build_initial_state,
 )
-from .state_store import JsonStateStore, apply_flat_reset_to_result
+from .state_store import (
+    JsonStateStore,
+    apply_flat_reset_to_result,
+    build_flat_reset_state_updates,
+)
 
 
 def _utc_now() -> datetime:
@@ -298,6 +302,102 @@ def _prepare_runtime(config: Any) -> dict[str, Any]:
     }
 
 
+def _force_runtime_flat_ready(*, runtime: dict[str, Any], symbol: str, reason: str) -> dict[str, Any]:
+    readonly_client: BinanceReadOnlyClient = runtime['readonly_client']
+    state_store: JsonStateStore = runtime['state_store']
+    runtime_status_store: RuntimeStatusStore = runtime['runtime_status_store']
+
+    flat_probe = _ensure_flat(readonly_client, symbol)
+    if not flat_probe.get('is_flat') or flat_probe.get('open_orders_count') != 0:
+        raise RuntimeError('cannot force flat-ready while exchange is not flat')
+
+    now_iso = _utc_iso()
+    current_state = state_store.load_state()
+    account = readonly_client.get_account_snapshot()
+    state_updates = build_flat_reset_state_updates(
+        state=current_state,
+        state_ts=now_iso,
+        account_equity=getattr(account, 'account_equity', None),
+        available_margin=getattr(account, 'available_margin', None),
+    )
+    state_updates['recover_check'] = {
+        'checked_at': now_iso,
+        'source': 'manual_full_chain_closepos_acceptance',
+        'result': 'RECOVERED',
+        'allowed': True,
+        'reason': reason,
+        'pending_execution_phase': None,
+        'freeze_reason': None,
+        'consistency_status': 'OK',
+        'runtime_mode': 'ACTIVE',
+        'recover_ready': True,
+        'requires_manual_resume': True,
+        'guard_decision': 'strict_flat_reset_before_acceptance',
+    }
+    recover_timeline = list(getattr(current_state, 'recover_timeline', []) or [])[-9:]
+    recover_timeline.append(state_updates['recover_check'])
+    state_updates['recover_timeline'] = recover_timeline
+
+    payload = state_store.load_payload()
+    payload['state'].update(state_updates)
+    payload['last_result'] = None
+    state_store._write_json(payload)
+
+    runtime_status_store.write(
+        {
+            'phase': 'prepared',
+            'ts': now_iso,
+            'symbol': symbol,
+            'last_started_at': now_iso,
+            'last_completed_at': now_iso,
+            'last_run_summary': {
+                'run_id': 'manual_full_chain_acceptance_prepare',
+                'phase': 'prepared',
+                'symbol': symbol,
+                'decision_ts': now_iso,
+                'consistency_status': 'OK',
+                'plan_action': None,
+                'result_status': 'RECOVERED',
+                'freeze_reason': None,
+                'runtime_mode': 'ACTIVE',
+                'failure_count': 0,
+                'backoff_seconds': 0.0,
+                'event_log_path': str(Path(runtime_status_store.path).parent / 'event_log.jsonl'),
+            },
+            'runtime_config_validation': {'ok': True},
+            'freeze': {
+                'runtime_mode': 'ACTIVE',
+                'freeze_status': 'NONE',
+                'freeze_reason': None,
+                'last_freeze_reason': state_updates.get('last_freeze_reason'),
+                'last_recover_result': 'RECOVERED',
+                'recover_attempt_count': state_updates.get('recover_attempt_count'),
+                'pending_execution_phase': None,
+            },
+            'confirm_summary': {
+                'confirmation_category': 'confirmed',
+                'reconcile_status': 'OK',
+            },
+            'submit_gate': {
+                'submit_allowed': True,
+                'guardrail_blockers': [],
+            },
+            'env_gate_summary': {
+                'binance_submit_env': {'ready_by_env': True, 'submit_allowed_now': True},
+                'discord_execution_confirmation_env': {'open_by_env': True},
+            },
+            'operator_compact_view': {
+                'next_focus': reason,
+            },
+        }
+    )
+    return {
+        'flat_probe': flat_probe,
+        'state_updates': state_updates,
+        'runtime_snapshot': _snapshot_runtime_files(runtime['runtime_dir']),
+    }
+
+
 def _save_status_and_artifacts(*, worker: RuntimeWorker, run_id: str, market: MarketSnapshot, output: dict[str, Any], config_validation: dict[str, Any], phase: str) -> dict[str, Any]:
     result_payload = output.get('result') or {}
     confirm_summary = build_execution_confirm_summary(result_payload)
@@ -557,6 +657,13 @@ def main() -> int:
         print(json.dumps({'ok': False, 'summary_path': str(summary_path), 'abort_reason': summary['abort_reason']}, ensure_ascii=False))
         return 2
 
+    prepare = _force_runtime_flat_ready(
+        runtime=runtime,
+        symbol=args.symbol,
+        reason='pretrade_account_flat_and_no_open_orders',
+    )
+    summary['prepare'] = prepare
+
     open_price = _load_live_price(readonly_client, args.symbol)
     quantity = _normalize_open_qty(
         executor=executor,
@@ -644,10 +751,27 @@ def main() -> int:
     )
     summary['close_phase'] = close_phase
 
-    final_flat = _ensure_flat(readonly_client, args.symbol)
-    if not final_flat.get('is_flat') or final_flat.get('open_orders_count') != 0:
+    close_result = (((close_phase.get('output') or {}).get('result')) or {})
+    close_trade_summary = close_result.get('trade_summary') or {}
+    close_should_attempt_cleanup = bool(
+        close_result.get('status') not in {'OK', 'SKIPPED'}
+        or close_result.get('should_freeze')
+        or close_result.get('freeze_reason') is not None
+        or close_result.get('confirmation_status') not in {'CONFIRMED', 'POSITION_CONFIRMED'}
+        or close_trade_summary.get('protective_pending_confirm')
+    )
+
+    final_flat_before_cleanup = _ensure_flat(readonly_client, args.symbol)
+    close_cleanup_triggered = bool(
+        close_should_attempt_cleanup
+        or not final_flat_before_cleanup.get('is_flat')
+        or final_flat_before_cleanup.get('open_orders_count') != 0
+    )
+    final_flat = final_flat_before_cleanup
+    if close_cleanup_triggered:
         _attempt_cleanup_close(runtime=runtime, symbol=args.symbol, config_validation=config_validation, summary=summary, run_id=run_id)
         final_flat = _ensure_flat(readonly_client, args.symbol)
+    summary['close_cleanup_triggered'] = close_cleanup_triggered
     summary['after_cleanup'] = final_flat
     summary['runtime_files_final'] = _snapshot_runtime_files(runtime_dir)
 

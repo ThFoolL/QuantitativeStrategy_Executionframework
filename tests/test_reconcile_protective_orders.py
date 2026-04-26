@@ -108,6 +108,28 @@ class ReconcileProtectiveOrdersCase(unittest.TestCase):
         self.assertIsNone(decision.freeze_reason)
         self.assertIn('management_stop_update_exchange_protective_visible', decision.notes)
 
+    def test_reconcile_stale_protective_missing_freeze_yields_to_exchange_visible_fact(self) -> None:
+        state = self.make_state()
+        state.consistency_status = 'FREEZE'
+        state.freeze_reason = 'protective_order_missing'
+        state.pending_execution_phase = 'frozen'
+        decision = reconcile_pre_run(
+            ReconcileInput(
+                state=state,
+                exchange=ExchangeSnapshot(
+                    account=AccountSnapshot(account_equity=1000.0, available_margin=900.0, raw={}),
+                    position=PositionSnapshot(symbol='ETHUSDT', side='long', qty=0.5, entry_price=2100.0, raw={}),
+                    open_orders=[self.protective_order()],
+                ),
+            )
+        )
+        self.assertEqual(decision.status, 'OK')
+        self.assertEqual(decision.freeze_reason, STOP_CONDITION_PROTECTION_TP_MISSING)
+        self.assertNotEqual(decision.freeze_reason, 'protective_order_missing')
+        self.assertEqual(decision.risk_action, 'RECOVER_PROTECTION')
+        self.assertIn('exchange_protective_fact_visible', decision.notes)
+        self.assertIn('stale_protective_missing_overridden_by_exchange_fact', decision.notes)
+
     def test_reconcile_treats_management_stop_update_missing_protective_as_pending_gap_not_freeze(self) -> None:
         state = self.make_state()
         state.pending_execution_phase = 'management_stop_update_pending_protective'

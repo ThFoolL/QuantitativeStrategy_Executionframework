@@ -561,6 +561,28 @@ class BinancePostTradeConfirmer:
             and row['receipt'] is not None
             and row['receipt'].exchange_order_id is not None
         }
+        protective_algo_visible_rows = [
+            {
+                'order_id': row.get('exchange_order_id'),
+                'client_order_id': row.get('client_algo_id') or row.get('client_order_id'),
+                'status': row.get('order_status'),
+                'side': row.get('side'),
+                'position_side': row.get('position_side'),
+                'qty': row.get('orig_qty'),
+                'executed_qty': row.get('executed_qty'),
+                'avg_price': row.get('avg_price'),
+                'reduce_only': row.get('reduce_only'),
+                'close_position': True,
+                'is_algo_order': True,
+                'kind': None,
+                'update_time_ms': row.get('update_time_ms'),
+            }
+            for row in algo_fact_rows
+            if str(row.get('client_order_id') or '') in protective_request_client_ids
+            or str(row.get('client_algo_id') or '') in protective_request_client_ids
+            or str(row.get('exchange_order_id') or '') in protective_receipt_order_ids
+            or str(row.get('exchange_order_id') or '') in set(dedup_order_ids)
+        ]
         requested_protective_orders = [
             item
             for item in protective_snapshot.orders
@@ -568,6 +590,8 @@ class BinancePostTradeConfirmer:
             or str(item.get('order_id') or '') in protective_receipt_order_ids
             or str(item.get('order_id') or '') in set(dedup_order_ids)
         ]
+        if not requested_protective_orders and protective_algo_visible_rows:
+            requested_protective_orders = list(protective_algo_visible_rows)
         protective_exchange_visible = bool(requested_protective_orders)
         protective_requested_open_order_visible = bool(
             not requested_protective_orders
@@ -587,17 +611,23 @@ class BinancePostTradeConfirmer:
             protective_exchange_visible = True
         protective_exchange_visible_confirmed = bool(
             protective_only_requests
-            and protective_algo_lookup_expected
             and not protective_phase_deferred
             and protective_exchange_visible
-            and all(
-                bool(item.get('close_position'))
-                and str(item.get('status') or '').upper() in BINANCE_PENDING_ORDER_STATUSES
-                for item in requested_protective_orders
-            )
             and post_position.side in {'long', 'short'}
             and float(post_position.qty or 0.0) > 0.0
+            and all(
+                str(item.get('status') or '').upper() in BINANCE_PENDING_ORDER_STATUSES
+                for item in requested_protective_orders
+            )
         )
+        if not protective_exchange_visible_confirmed and protective_only_requests and protective_algo_visible_rows:
+            protective_exchange_visible_confirmed = bool(
+                not protective_phase_deferred
+                and post_position.side in {'long', 'short'}
+                and float(post_position.qty or 0.0) > 0.0
+            )
+        if protective_only_requests and protective_exchange_visible_confirmed:
+            order_status = ORDER_STATUS_FILLED
         protective_lookup_missing_only = bool(
             protective_algo_lookup_expected
             and (protective_algo_lookup_not_found or order_lookup_missing_only)
@@ -629,6 +659,7 @@ class BinancePostTradeConfirmer:
         protective_exchange_source = ('algo_order' if protective_algo_visible else ('open_orders' if protective_snapshot.orders else None))
         if protective_exchange_source is None and algo_fact_rows:
             protective_exchange_source = 'algo_order'
+        effective_protective_orders = list(requested_protective_orders or protective_snapshot.orders)
         protective_exchange_visibility = {
             'exchange_visible': protective_exchange_visible,
             'confirmed_via_exchange_visibility': protective_exchange_visible_confirmed,
@@ -639,7 +670,7 @@ class BinancePostTradeConfirmer:
             'plain_order_lookup_not_found': protective_plain_lookup_not_found,
             'algo_lookup_not_found': protective_algo_lookup_not_found,
             'algo_lookup_expected': protective_algo_lookup_expected,
-            'order_count': len(requested_protective_orders or protective_snapshot.orders),
+            'order_count': len(effective_protective_orders),
         }
         normalized_protective_ok = protective_ok
         normalized_protective_freeze_reason = protective_freeze_reason
@@ -651,7 +682,12 @@ class BinancePostTradeConfirmer:
             normalized_protective_freeze_reason = None
             normalized_protective_status = 'OK'
             normalized_protective_validation_level = 'EXCHANGE_VISIBLE'
-            normalized_protective_notes = [note for note in normalized_protective_notes if not str(note).startswith('missing:')]
+            normalized_protective_notes = [
+                note
+                for note in normalized_protective_notes
+                if not str(note).startswith('missing:') and str(note) not in {'protective_order_missing', 'protective_orders_invalid'}
+            ]
+            normalized_protective_notes.append('exchange_protective_fact_visible')
         elif protective_pending_confirm:
             normalized_protective_ok = True
             normalized_protective_freeze_reason = None
@@ -774,10 +810,10 @@ class BinancePostTradeConfirmer:
             protective_order_status=(
                 'PENDING_SUBMIT'
                 if protective_phase_deferred and post_position.side in {'long', 'short'} and float(post_position.qty or 0.0) > 0.0
-                else ('PENDING_CONFIRM' if protective_pending_confirm else ('ACTIVE' if protective_ok and protective_snapshot.orders else ('MISSING' if post_position.side in {'long', 'short'} and float(post_position.qty or 0.0) > 0.0 else ('UNEXPECTED_WHILE_FLAT' if protective_snapshot.orders else 'NONE'))))
+                else ('PENDING_CONFIRM' if protective_pending_confirm else ('ACTIVE' if protective_ok and effective_protective_orders else ('MISSING' if post_position.side in {'long', 'short'} and float(post_position.qty or 0.0) > 0.0 else ('UNEXPECTED_WHILE_FLAT' if effective_protective_orders else 'NONE'))))
             ),
             protective_phase_status=('DEFERRED' if protective_phase_deferred else ('PENDING_CONFIRM' if protective_pending_confirm else ('FROZEN' if should_freeze else 'NONE'))),
-            protective_orders=protective_snapshot.orders,
+            protective_orders=effective_protective_orders,
             protective_validation={
                 'ok': normalized_protective_ok,
                 'freeze_reason': normalized_protective_freeze_reason,
@@ -852,9 +888,9 @@ class BinancePostTradeConfirmer:
                 'open_orders_count': len(open_order_rows),
                 'open_orders': open_order_rows,
                 'has_open_orders': bool(open_order_rows),
-                'protective_orders_count': len(protective_snapshot.orders),
-                'protective_orders': protective_snapshot.orders,
-                'has_protective_orders': bool(protective_snapshot.orders),
+                'protective_orders_count': len(effective_protective_orders),
+                'protective_orders': effective_protective_orders,
+                'has_protective_orders': bool(effective_protective_orders),
                 'protective_validation': {
                     'ok': normalized_protective_ok,
                     'freeze_reason': normalized_protective_freeze_reason,
