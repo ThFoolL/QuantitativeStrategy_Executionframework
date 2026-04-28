@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -133,6 +134,143 @@ class ExecutorSubmitGateCase(unittest.TestCase):
         self.assertEqual(payload['newClientOrderId'], 'cid-1')
         self.assertEqual(payload['quantity'], 0.015)
         self.assertNotIn('reduceOnly', payload)
+
+    def test_frozen_emergency_close_bypasses_pending_execution_frozen_guardrail(self) -> None:
+        config = BinanceEnvConfig(
+            api_key='k',
+            api_secret='s',
+            symbol='ETHUSDT',
+            dry_run=False,
+            submit_enabled=True,
+            submit_http_post_enabled=True,
+            submit_unlock_token=BINANCE_LIVE_SUBMIT_UNLOCK_TOKEN,
+            submit_symbol_allowlist=('ETHUSDT',),
+            submit_max_qty=0.1,
+            submit_max_notional=1000.0,
+            discord_audit_enabled=True,
+            submit_manual_ack_token=LIVE_SUBMIT_MANUAL_ACK_TOKEN,
+            submit_require_no_pending_execution=True,
+            submit_require_active_runtime=True,
+        )
+        executor = BinanceRealExecutor(config=config, readonly_client=StubReadonlyClient())
+        state = self.make_state()
+        state.runtime_mode = 'FROZEN'
+        state.freeze_status = 'ACTIVE'
+        state.freeze_reason = 'protective_order_missing'
+        state.pending_execution_phase = 'frozen'
+        state.exchange_position_side = 'short'
+        state.exchange_position_qty = 0.021
+        market = MarketSnapshot(
+            decision_ts='2026-03-25T15:00:33+00:00',
+            bar_ts='2026-03-25T15:00:00+00:00',
+            strategy_ts=None,
+            execution_attributed_bar=None,
+            symbol='ETHUSDT',
+            preclose_offset_seconds=27,
+            current_price=2100.0,
+            source_status='OK',
+        )
+        request = BinanceOrderRequest(
+            symbol='ETHUSDT',
+            side='BUY',
+            order_type='MARKET',
+            quantity=0.021,
+            reduce_only=True,
+            position_side=None,
+            client_order_id='cid-emergency-close',
+            metadata={'reason': 'emergency_close_after_protective_missing'},
+        )
+
+        gate = executor._evaluate_submit_gate(
+            market=market,
+            state=state,
+            order_requests=[request],
+            blocked_reason='dry_run_or_submit_disabled',
+            allow_frozen_emergency_close=True,
+        )
+
+        self.assertTrue(gate['http_post_allowed'])
+        self.assertTrue(gate['submit_allowed'])
+        self.assertNotIn('pending_execution_phase:frozen', gate['guardrail_blockers'])
+
+    def test_close_flat_terminal_cleanup_unfreezes_runtime(self) -> None:
+        config = BinanceEnvConfig(
+            api_key='k',
+            api_secret='s',
+            symbol='ETHUSDT',
+            dry_run=False,
+            submit_enabled=True,
+            submit_http_post_enabled=True,
+            submit_unlock_token=BINANCE_LIVE_SUBMIT_UNLOCK_TOKEN,
+            submit_symbol_allowlist=('ETHUSDT',),
+            submit_max_qty=0.1,
+            submit_max_notional=1000.0,
+            discord_audit_enabled=True,
+            submit_manual_ack_token=LIVE_SUBMIT_MANUAL_ACK_TOKEN,
+        )
+        executor = BinanceRealExecutor(config=config, readonly_client=StubReadonlyClient())
+        plan = FinalActionPlan(
+            plan_ts='2026-03-25T15:00:33+00:00',
+            bar_ts='2026-03-25T15:00:00+00:00',
+            action_type='close',
+            target_strategy='manual_protective_missing_probe',
+            target_side='short',
+            reason='emergency_close_after_protective_missing',
+            qty_mode='full_close',
+            qty=None,
+            price_hint=2100.0,
+            requires_execution=True,
+            close_reason='emergency_close_after_protective_missing',
+        )
+        market = MarketSnapshot(
+            decision_ts='2026-03-25T15:00:33+00:00',
+            bar_ts='2026-03-25T15:00:00+00:00',
+            strategy_ts=None,
+            execution_attributed_bar=None,
+            symbol='ETHUSDT',
+            preclose_offset_seconds=27,
+            current_price=2100.0,
+            source_status='OK',
+        )
+        state = self.make_state()
+        state.runtime_mode = 'FROZEN'
+        state.freeze_status = 'ACTIVE'
+        state.freeze_reason = 'protective_order_missing'
+        confirmation = SimpleNamespace(
+            confirmation_status='POSITION_CONFIRMED',
+            confirmation_category='position_confirmed',
+            order_status='FILLED',
+            reconcile_status='OK',
+            should_freeze=False,
+            freeze_reason=None,
+            executed_qty=0.0,
+            avg_fill_price=None,
+            fees=0.0,
+            exchange_order_ids=['oid-close'],
+            post_position_side=None,
+            post_position_qty=0.0,
+            post_entry_price=None,
+            trade_summary={'protective_cancel_summary': {'ok': True, 'cancel_count': 0, 'receipts': []}},
+            notes=['position_confirmed_without_trade_rows'],
+        )
+
+        result = executor._build_execution_result_from_confirmation(
+            market=market,
+            plan=plan,
+            confirmation=confirmation,
+            status='FILLED',
+            execution_phase='none',
+            error_code=None,
+            error_message=None,
+            state=state,
+        )
+
+        self.assertEqual(result.state_updates['runtime_mode'], 'ACTIVE')
+        self.assertEqual(result.state_updates['freeze_status'], 'NONE')
+        self.assertIsNone(result.state_updates['freeze_reason'])
+        self.assertEqual(result.state_updates['last_recover_result'], 'RECOVERED')
+        self.assertEqual(result.state_updates['recover_check']['result'], 'RECOVERED')
+        self.assertEqual(result.state_updates['recover_check']['source'], 'close_flat_terminal_cleanup')
 
     def test_submit_orders_returns_receipts_when_gate_open(self) -> None:
         config = BinanceEnvConfig(

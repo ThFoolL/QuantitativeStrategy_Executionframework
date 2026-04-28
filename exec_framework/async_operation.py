@@ -1298,6 +1298,16 @@ def _build_execution_confirm_recover_check(
         or operation.get('pending_execution_phase_view')
         or operation.get('trigger_phase')
     )
+    current_recover = dict(merged_state.get('recover_check') or {})
+    current_stop_condition = current_recover.get('stop_condition') or ((result_payload.get('state_updates') or {}).get('recover_check') or {}).get('stop_condition')
+    current_risk_action = current_recover.get('risk_action') or ((result_payload.get('state_updates') or {}).get('recover_check') or {}).get('risk_action')
+    current_recover_stage = current_recover.get('recover_stage') or ((result_payload.get('state_updates') or {}).get('recover_check') or {}).get('recover_stage')
+    if (
+        current_stop_condition == 'position_open_without_protection'
+        or current_risk_action == 'FORCE_CLOSE'
+        or current_recover_stage == 'force_close_without_protection'
+    ):
+        return None
     if pending_execution_phase not in EXECUTION_CONFIRM_PENDING_PHASES:
         return None
 

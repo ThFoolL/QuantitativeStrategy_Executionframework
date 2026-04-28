@@ -1099,10 +1099,10 @@ class BinanceRealExecutor:
             })
         elif dangerous_missing_protection:
             details.update({
-                'recover_policy': 'observe_pending',
-                'recover_policy_display': 'observe_pending',
-                'legacy_recover_policy': 'observe_pending',
-                'recover_stage': 'observe_pending',
+                'recover_policy': 'keep_frozen',
+                'recover_policy_display': 'force_close',
+                'legacy_recover_policy': 'keep_frozen',
+                'recover_stage': 'force_close_without_protection',
                 'risk_action': 'FORCE_CLOSE',
                 'stop_reason': 'protective_order_missing',
                 'stop_category': 'frozen',
@@ -1782,7 +1782,23 @@ class BinanceRealExecutor:
             if not bridge_orders and state is not None:
                 bridge_orders = list((state.exchange_protective_orders or []))
             if bridge_orders:
-                protective_orders = bridge_orders
+                if plan.action_type == 'protective_rebuild':
+                    try:
+                        expected_stop_price = float(plan.stop_price) if plan.stop_price is not None else None
+                    except (TypeError, ValueError):
+                        expected_stop_price = None
+                    if expected_stop_price is not None:
+                        filtered_bridge_orders = []
+                        for item in bridge_orders:
+                            try:
+                                bridge_stop_price = float((item or {}).get('stop_price')) if (item or {}).get('stop_price') is not None else None
+                            except (TypeError, ValueError):
+                                bridge_stop_price = None
+                            if bridge_stop_price is None or abs(bridge_stop_price - expected_stop_price) <= 1e-9:
+                                filtered_bridge_orders.append(item)
+                        bridge_orders = filtered_bridge_orders
+                if bridge_orders:
+                    protective_orders = bridge_orders
         if pretrade_recover_updates:
             state_updates.update(pretrade_recover_updates)
         protective_phase_status = (
@@ -1948,7 +1964,38 @@ class BinanceRealExecutor:
         }
         if should_force_terminal_cleanup:
             updates.update({
+                'runtime_mode': 'ACTIVE',
+                'freeze_status': 'NONE',
+                'freeze_reason': None,
+                'pending_execution_phase': None,
+                'pending_execution_block_reason': None,
+                'can_open_new_position': True,
+                'can_modify_position': True,
+                'last_recover_result': 'RECOVERED',
+                'last_recover_at': market.decision_ts,
                 'protective_phase_status': 'NONE',
+                'recover_check': {
+                    'checked_at': market.decision_ts,
+                    'source': 'close_flat_terminal_cleanup',
+                    'result': 'RECOVERED',
+                    'allowed': True,
+                    'reason': 'close_confirmed_flat',
+                    'pending_execution_phase': None,
+                    'consistency_status': 'OK',
+                    'runtime_mode': 'ACTIVE',
+                    'recover_ready': True,
+                    'requires_manual_resume': False,
+                    'guard_decision': 'flat_after_force_close',
+                    'recover_policy': 'recover_ready',
+                    'recover_policy_display': 'recover_ready',
+                    'legacy_recover_policy': 'recover_ready',
+                    'recover_stage': 'recover_ready',
+                    'risk_action': 'NONE',
+                    'stop_reason': 'confirmed',
+                    'stop_condition': 'position_fact_confirmed_before_trade_rows',
+                    'stop_category': 'observe_only',
+                    'action_type': 'close',
+                },
                 'strategy_protection_intent': build_strategy_protection_intent(
                     runtime_mode='ACTIVE',
                     position_side=None,
@@ -2633,11 +2680,13 @@ class BinanceRealExecutor:
             and all(bool(getattr(item, 'reduce_only', False)) for item in order_requests)
             and any(str(getattr(item, 'order_type', '') or '').upper() == 'MARKET' for item in order_requests)
         )
+        frozen_emergency_close_phase = allow_frozen_emergency_close and pending_phase == 'frozen'
         if (
             self.config.submit_require_no_pending_execution
             and pending_phase not in {None, 'none', 'confirmed'}
             and not protective_followup_phase
             and not reduce_only_close_followup_phase
+            and not frozen_emergency_close_phase
         ):
             guardrail_blockers.append(f'pending_execution_phase:{pending_phase}')
         if not self.config.discord_audit_enabled:

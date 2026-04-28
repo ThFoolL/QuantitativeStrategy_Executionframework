@@ -520,6 +520,11 @@ class RuntimeWorker:
             if recover_info is not None:
                 updated_state = self.state_store.load_state()
                 output['state'] = asdict(updated_state)
+                load_last_result = getattr(self.state_store, 'load_last_result', None)
+                if callable(load_last_result):
+                    refreshed_result = load_last_result()
+                    if refreshed_result is not None:
+                        output['result'] = asdict(refreshed_result)
 
             self.event_log.append(
                 'reconcile_result',
@@ -563,6 +568,25 @@ class RuntimeWorker:
             if readonly_recheck is not None:
                 output = self._apply_readonly_recheck_output(output, readonly_recheck)
                 output = self._attach_execution_retry_backoff(output)
+                state_after_recheck = output.get('state') or {}
+                save_state = getattr(self.state_store, 'save_state', None)
+                if callable(save_state):
+                    current_state = self.state_store.load_state()
+                    next_state = replace(current_state)
+                    for key, value in state_after_recheck.items():
+                        if hasattr(next_state, key):
+                            setattr(next_state, key, value)
+                    save_state(next_state)
+                    if next_state.runtime_mode == 'FROZEN':
+                        recover_info = self._maybe_attempt_recover(next_state, run_id=run_id)
+                        if recover_info is not None:
+                            refreshed_state = self.state_store.load_state()
+                            output['state'] = asdict(refreshed_state)
+                            load_last_result = getattr(self.state_store, 'load_last_result', None)
+                            if callable(load_last_result):
+                                refreshed_result = load_last_result()
+                                if refreshed_result is not None:
+                                    output['result'] = asdict(refreshed_result)
                 result_payload = output.get('result') or {}
             confirm_summary = build_execution_confirm_summary(result_payload)
             self.event_log.append(
@@ -1928,16 +1952,17 @@ class RuntimeWorker:
         if manual_review_reason is not None:
             unresolved_reason = confirmation.freeze_reason or manual_review_reason
             if manual_review_reason == 'protection_missing':
-                pending_phase = trigger_phase or self.ORCHESTRATION_ENTRY_PENDING_PROTECTIVE
+                unresolved_reason = 'protective_order_missing'
+                pending_phase = 'frozen'
                 return ReadonlyRecheckDecision(
-                    status=READONLY_RECHECK_PENDING,
-                    action='observe',
+                    status=READONLY_RECHECK_FREEZE,
+                    action='freeze',
                     summary={
                         **base_summary,
-                        'status': READONLY_RECHECK_PENDING,
-                        'action': 'observe',
+                        'status': READONLY_RECHECK_FREEZE,
+                        'action': 'freeze',
                         'reason': manual_review_reason,
-                        'risk_action': RISK_ACTION_RECOVER_PROTECTION,
+                        'risk_action': 'FORCE_CLOSE',
                         'confirmed_flat': False,
                     },
                     state_updates={
@@ -1959,12 +1984,14 @@ class RuntimeWorker:
                     freeze_reason=unresolved_reason,
                     recover_check=build_readonly_recheck_recover_check(
                         decision={
-                            'status': READONLY_RECHECK_PENDING,
+                            'status': READONLY_RECHECK_FREEZE,
                             'freeze_reason': unresolved_reason,
                             'reason': manual_review_reason,
-                            'stop_reason': manual_review_reason,
-                            'stop_condition': manual_review_stop_condition,
-                            'recover_stage': manual_review_recover_stage,
+                            'stop_reason': 'protective_order_missing',
+                            'stop_condition': 'position_open_without_protection',
+                            'recover_policy': 'keep_frozen',
+                            'recover_stage': 'force_close_without_protection',
+                            'pending_execution_phase': 'frozen',
                             'checked_at': str((confirmation.trade_summary or {}).get('decision_ts') or ''),
                         }
                     ),
@@ -2447,7 +2474,12 @@ class RuntimeWorker:
                 or state_updates.get('protective_order_status') == 'ACTIVE'
             )
         )
-        if positive_protective_fact:
+        force_close_terminal_fact = bool(
+            current_stop_condition == 'position_open_without_protection'
+            or recover_check.get('risk_action') == 'FORCE_CLOSE'
+            or recover_check.get('recover_stage') == 'force_close_without_protection'
+        )
+        if positive_protective_fact and not force_close_terminal_fact:
             recover_check['recover_ready'] = True
             recover_check['recover_stage'] = 'recover_ready'
             recover_check['recover_policy'] = 'recover_ready'
@@ -2681,6 +2713,20 @@ class RuntimeWorker:
         }
 
     def _maybe_force_reduce_only_close_without_protection(self, *, state: LiveStateSnapshot, run_id: str) -> dict[str, Any] | None:
+        effective_position_side = state.exchange_position_side
+        effective_position_qty = float(state.exchange_position_qty or 0.0)
+        effective_entry_price = state.exchange_entry_price
+        if state.freeze_reason == 'protective_order_missing' and (effective_position_side not in {'long', 'short'} or effective_position_qty <= 0.0):
+            readonly_client = getattr(getattr(self.engine, 'pre_run_reconcile_module', None), 'readonly_client', None)
+            try:
+                exchange_position = readonly_client.get_position_snapshot(self.config.symbol) if readonly_client is not None else None
+            except Exception:
+                exchange_position = None
+            if exchange_position is not None and exchange_position.side in {'long', 'short'} and float(exchange_position.qty or 0.0) > 0.0:
+                effective_position_side = exchange_position.side
+                effective_position_qty = float(exchange_position.qty or 0.0)
+                effective_entry_price = exchange_position.entry_price
+
         self.event_log.append(
             'reduce_only_close_probe',
             {
@@ -2688,29 +2734,35 @@ class RuntimeWorker:
                 'freeze_reason': state.freeze_reason,
                 'exchange_position_side': state.exchange_position_side,
                 'exchange_position_qty': state.exchange_position_qty,
+                'effective_position_side': effective_position_side,
+                'effective_position_qty': effective_position_qty,
                 'active_strategy': state.active_strategy,
             },
         )
         if state.freeze_reason != 'protective_order_missing':
             return None
-        if state.exchange_position_side not in {'long', 'short'} or float(state.exchange_position_qty or 0.0) <= 0.0:
+        if effective_position_side not in {'long', 'short'} or effective_position_qty <= 0.0:
             return None
 
         executor = getattr(self.engine, 'executor_module', None)
         if executor is None or not hasattr(executor, 'execute'):
             return None
 
-        market_provider = getattr(self.scheduler, 'provider', None)
+        market_provider = self.market_provider
         if market_provider is None:
             return None
 
-        market = market_provider.load(symbol=self.config.symbol, decision_time=self.scheduler.now())
+        market = build_market_snapshot(
+            provider=market_provider,
+            symbol=self.config.symbol,
+            decision_time=datetime.now(timezone.utc),
+        )
         plan = FinalActionPlan(
             plan_ts=market.decision_ts,
             bar_ts=market.bar_ts,
             action_type='close',
             target_strategy=state.active_strategy or 'manual_residual_cleanup',
-            target_side=state.exchange_position_side,
+            target_side=effective_position_side,
             reason='emergency_close_after_protective_missing',
             qty_mode='full_close',
             qty=None,
@@ -2728,7 +2780,11 @@ class RuntimeWorker:
                 'plan': asdict(plan),
             },
         )
-        result = executor.execute(plan, market, state)
+        effective_state = replace(state)
+        effective_state.exchange_position_side = effective_position_side
+        effective_state.exchange_position_qty = effective_position_qty
+        effective_state.exchange_entry_price = effective_entry_price
+        result = executor.execute(plan, market, effective_state)
         self.state_store.save_result(state, result)
         updated_state = self.state_store.load_state()
         self.event_log.append(
