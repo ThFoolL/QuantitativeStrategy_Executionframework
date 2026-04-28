@@ -641,8 +641,13 @@ def _resolve_recover_guard_decision(
 
 
 def _build_runtime_recover_check(state: LiveStateSnapshot) -> dict[str, Any]:
+    force_close_protection_missing = bool(
+        state.freeze_reason == 'protective_order_missing'
+        and state.exchange_position_side in {'long', 'short'}
+        and float(state.exchange_position_qty or 0.0) > 0.0
+    )
     active_async_operation = _select_runtime_guard_async_operation(state.async_operations)
-    if active_async_operation:
+    if active_async_operation and not force_close_protection_missing:
         return _build_async_recover_projection(state=state, operation=active_async_operation)
 
     recover_check = dict(state.recover_check or {})

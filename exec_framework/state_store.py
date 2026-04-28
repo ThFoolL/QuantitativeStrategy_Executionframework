@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, replace
+from dataclasses import asdict, fields, replace
 from typing import Any
 from pathlib import Path
 
@@ -194,6 +194,11 @@ def apply_pre_run_reconcile(
     )
 
 
+def _filter_dataclass_payload(payload: dict[str, Any], dataclass_type: type[Any]) -> dict[str, Any]:
+    allowed = {item.name for item in fields(dataclass_type)}
+    return {key: value for key, value in dict(payload or {}).items() if key in allowed}
+
+
 class JsonStateStore:
     def __init__(self, path: str | Path, initial_state: LiveStateSnapshot):
         self.path = Path(path)
@@ -214,7 +219,7 @@ class JsonStateStore:
 
     def load_state(self) -> LiveStateSnapshot:
         payload = self.load_payload()
-        return LiveStateSnapshot(**payload['state'])
+        return LiveStateSnapshot(**_filter_dataclass_payload(payload['state'], LiveStateSnapshot))
 
     def save_state(self, state: LiveStateSnapshot) -> None:
         payload = self.load_payload()
@@ -226,7 +231,7 @@ class JsonStateStore:
         last_result = payload.get('last_result')
         if last_result is None:
             return None
-        return ExecutionResult(**last_result)
+        return ExecutionResult(**_filter_dataclass_payload(last_result, ExecutionResult))
 
     def save_result(self, state: LiveStateSnapshot, result: ExecutionResult) -> None:
         if result.state_updates:

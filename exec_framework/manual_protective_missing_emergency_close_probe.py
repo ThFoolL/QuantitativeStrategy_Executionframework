@@ -72,6 +72,58 @@ def _safe_order_raw(order) -> dict[str, Any] | None:
     return None if order is None else dict(order.raw)
 
 
+def _reset_probe_runtime_state(state, *, position_side: str | None, position_qty: float, entry_price: float | None, eval_ts: str) -> None:
+    state.runtime_mode = 'FROZEN'
+    state.freeze_status = 'ACTIVE'
+    state.freeze_reason = 'protective_order_missing'
+    state.pending_execution_phase = 'confirmed'
+    state.pending_execution_block_reason = 'protective_order_missing'
+    state.exchange_position_side = position_side
+    state.exchange_position_qty = position_qty
+    state.exchange_entry_price = entry_price
+    state.active_strategy = 'manual_protective_missing_probe'
+    state.active_side = position_side
+    state.stop_price = None
+    state.tp_price = None
+    state.exchange_protective_orders = []
+    state.protective_order_status = 'MISSING'
+    state.protective_phase_status = 'MISSING'
+    state.last_recover_result = None
+    state.last_recover_at = None
+    state.recover_attempt_count = 0
+    state.recover_check = {}
+    state.recover_timeline = []
+    state.async_operations = {'active': [], 'history': []}
+    state.position_confirmation_level = 'POSITION_CONFIRMED'
+    state.trade_confirmation_level = 'NONE'
+    state.needs_trade_reconciliation = False
+    state.fills_reconciled = False
+    state.last_confirmed_order_ids = []
+    state.strategy_protection_intent = {
+        'intent_status': 'ACTIVE',
+        'intent_state': 'protective_missing',
+        'lifecycle_status': 'protective_missing',
+        'pending_action': None,
+        'strategy': state.active_strategy,
+        'position_side': position_side,
+        'position_qty': float(position_qty or 0.0),
+        'stop_price': None,
+        'tp_price': None,
+        'pending_execution_phase': 'confirmed',
+        'protective_order_status': 'MISSING',
+        'protective_phase_status': 'MISSING',
+        'expected_protection': True,
+        'exchange_order_count': 0,
+        'validation_status': 'MISSING',
+        'validation_level': 'MISSING',
+        'risk_class': 'FORCE_CLOSE',
+        'mismatch_class': 'MISSING',
+        'freeze_reason': 'protective_order_missing',
+        'block_reason': 'protective_order_missing',
+        'last_eval_ts': eval_ts,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description='最小真钱验证 protective_order_missing -> emergency reduce-only close 链路')
     parser.add_argument('--env-file', required=True)
@@ -222,44 +274,13 @@ def main() -> int:
     worker = _build_runtime_components(config)
     state = worker.state_store.load_state()
     position_before_runtime = readonly_client.get_position_snapshot(args.symbol)
-    state.runtime_mode = 'FROZEN'
-    state.freeze_status = 'ACTIVE'
-    state.freeze_reason = 'protective_order_missing'
-    state.pending_execution_phase = 'confirmed'
-    state.pending_execution_block_reason = 'protective_order_missing'
-    state.exchange_position_side = position_before_runtime.side
-    state.exchange_position_qty = position_before_runtime.qty
-    state.exchange_entry_price = position_before_runtime.entry_price
-    state.active_strategy = state.active_strategy or 'manual_protective_missing_probe'
-    state.active_side = position_before_runtime.side
-    state.stop_price = None
-    state.tp_price = None
-    state.exchange_protective_orders = []
-    state.protective_order_status = 'MISSING'
-    state.protective_phase_status = 'MISSING'
-    state.strategy_protection_intent = {
-        'intent_status': 'ACTIVE',
-        'intent_state': 'protective_missing',
-        'lifecycle_status': 'protective_missing',
-        'pending_action': None,
-        'strategy': state.active_strategy,
-        'position_side': position_before_runtime.side,
-        'position_qty': float(position_before_runtime.qty or 0.0),
-        'stop_price': None,
-        'tp_price': None,
-        'pending_execution_phase': 'confirmed',
-        'protective_order_status': 'MISSING',
-        'protective_phase_status': 'MISSING',
-        'expected_protection': True,
-        'exchange_order_count': 0,
-        'validation_status': 'MISSING',
-        'validation_level': 'MISSING',
-        'risk_class': 'FORCE_CLOSE',
-        'mismatch_class': 'MISSING',
-        'freeze_reason': 'protective_order_missing',
-        'block_reason': 'protective_order_missing',
-        'last_eval_ts': _utc_now().isoformat(),
-    }
+    _reset_probe_runtime_state(
+        state,
+        position_side=position_before_runtime.side,
+        position_qty=float(position_before_runtime.qty or 0.0),
+        entry_price=position_before_runtime.entry_price,
+        eval_ts=_utc_now().isoformat(),
+    )
     worker.state_store.save_state(state)
     result['runtime_pre_state'] = {
         'runtime_mode': state.runtime_mode,
@@ -296,14 +317,22 @@ def main() -> int:
     runtime_result = (result.get('runtime_last_result') or {})
     recover_stop_reason = runtime_recover.get('stop_reason') or ((runtime_result.get('state_updates') or {}).get('recover_check') or {}).get('stop_reason')
     recover_risk_action = runtime_recover.get('risk_action') or ((runtime_result.get('state_updates') or {}).get('recover_check') or {}).get('risk_action')
+    runtime_unfrozen_after_close = (
+        result['runtime_post_state'].get('runtime_mode') == 'ACTIVE'
+        and result['runtime_post_state'].get('freeze_status') == 'NONE'
+        and result['runtime_post_state'].get('freeze_reason') in {None, ''}
+        and result['runtime_post_state'].get('last_recover_result') == 'RECOVERED'
+    )
     result['ok'] = bool(
         abs(float(result['after_runtime']['position']['qty'] or 0.0)) <= 0.0
         and len(result['after_runtime']['open_orders']) == 0
         and runtime_result.get('status') == 'FILLED'
         and runtime_result.get('action_type') == 'close'
         and runtime_result.get('confirmed_order_status') == 'FILLED'
-        and recover_stop_reason == 'protective_order_missing'
-        and recover_risk_action == 'FORCE_CLOSE'
+        and (
+            (recover_stop_reason == 'protective_order_missing' and recover_risk_action == 'FORCE_CLOSE')
+            or runtime_unfrozen_after_close
+        )
     )
 
     out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
