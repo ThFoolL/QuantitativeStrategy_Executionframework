@@ -992,16 +992,21 @@ class RuntimeWorker:
             return False
         if result_payload.get('reconcile_status') != 'OK':
             return False
+        confirmation_status = str(result_payload.get('confirmation_status') or '')
+        execution_phase = str(result_payload.get('execution_phase') or '')
         executed_qty = result_payload.get('executed_qty')
         post_position_qty = result_payload.get('post_position_qty')
         avg_fill_price = result_payload.get('avg_fill_price')
         post_entry_price = result_payload.get('post_entry_price')
         post_position_side = result_payload.get('post_position_side')
-        return bool(
-            post_position_side in {'long', 'short'}
-            and ((executed_qty is not None and float(executed_qty or 0.0) > 0.0) or (post_position_qty is not None and float(post_position_qty or 0.0) > 0.0))
-            and (avg_fill_price is not None or post_entry_price is not None)
-        )
+        has_position_fact = post_position_side in {'long', 'short'} and (post_position_qty is not None and float(post_position_qty or 0.0) > 0.0)
+        has_fill_or_entry_price = avg_fill_price is not None or post_entry_price is not None
+        has_execution_evidence = (executed_qty is not None and float(executed_qty or 0.0) > 0.0) or has_position_fact
+        if not (has_position_fact and has_fill_or_entry_price and has_execution_evidence):
+            return False
+        if confirmation_status == 'CONFIRMED' and execution_phase == 'confirmed':
+            return True
+        return confirmation_status == 'POSITION_CONFIRMED' and execution_phase == 'position_confirmed_pending_trades'
 
     @staticmethod
     def _build_async_protective_close_publishable_candidate(
