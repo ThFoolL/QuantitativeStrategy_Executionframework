@@ -54,7 +54,7 @@ def _classify_error(exc: Exception) -> dict[str, Any]:
         msg = endpoint_payload.get('msg') or endpoint_payload.get('message') or parsed.get('reason')
         if kind == 'network_error':
             category = 'network'
-        elif kind == 'http_error' and status in (401, 403) or code in (-2014, -2015):
+        elif kind == 'http_error' and (status in (401, 403) or code in (-2014, -2015)):
             category = 'auth'
         elif kind == 'http_error' and status == 404:
             category = 'endpoint'
