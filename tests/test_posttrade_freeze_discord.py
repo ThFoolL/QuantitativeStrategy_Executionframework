@@ -240,12 +240,74 @@ class PostTradeFreezeDiscordCase(unittest.TestCase):
     def test_confirmed_result_can_build_payload(self) -> None:
         result = self.make_confirmed_result()
         publisher = DiscordPublisher('DISCORD_CHANNEL_ID_PLACEHOLDER')
-        payload = publisher.build_execution_confirmation(market=self.make_market(), state=self.make_state(), result=result)
+        payload = publisher.build_execution_confirmation(
+            market=self.make_market(),
+            state=self.make_state(
+                active_strategy='rev',
+                active_side='long',
+                exchange_position_side='long',
+                exchange_position_qty=0.5,
+                exchange_entry_price=2100.0,
+                stop_price=2050.0,
+                tp_price=2140.0,
+            ),
+            result=result,
+        )
         self.assertEqual(result.trade_summary['confirmation_category'], 'confirmed')
         self.assertEqual(payload.channel_id, 'DISCORD_CHANNEL_ID_PLACEHOLDER')
         self.assertIn('执行确认', payload.content)
         self.assertIn('交易对: BTCUSDT', payload.content)
         self.assertIn('手续费: 0.9', payload.content)
+
+    def test_position_confirmed_open_result_can_build_payload(self) -> None:
+        result = self.make_confirmed_result()
+        result.confirmation_status = 'POSITION_CONFIRMED'
+        result.execution_phase = 'position_confirmed_pending_trades'
+        result.confirmed_order_status = 'FILLED'
+        result.post_position_side = 'long'
+        result.post_position_qty = 0.5
+        result.post_entry_price = 2100.0
+        result.trade_summary = dict(result.trade_summary or {})
+        result.trade_summary['confirmation_category'] = 'position_confirmed'
+        publisher = DiscordPublisher('DISCORD_CHANNEL_ID_PLACEHOLDER')
+        state = self.make_state(
+            active_strategy='rev',
+            active_side='long',
+            exchange_position_side='long',
+            exchange_position_qty=0.5,
+            exchange_entry_price=2100.0,
+            stop_price=2050.0,
+            tp_price=2140.0,
+        )
+        payload = publisher.build_execution_confirmation(market=self.make_market(), state=state, result=result)
+        self.assertIn('执行确认', payload.content)
+        self.assertIn('动作: open', payload.content)
+        self.assertEqual(payload.metadata['kind'], 'execution_confirmation')
+
+    def test_position_confirmed_open_result_without_stop_tp_still_can_build_payload(self) -> None:
+        result = self.make_confirmed_result()
+        result.confirmation_status = 'POSITION_CONFIRMED'
+        result.execution_phase = 'position_confirmed_pending_trades'
+        result.confirmed_order_status = 'FILLED'
+        result.post_position_side = 'long'
+        result.post_position_qty = 0.5
+        result.post_entry_price = 2100.0
+        result.trade_summary = dict(result.trade_summary or {})
+        result.trade_summary['confirmation_category'] = 'position_confirmed'
+        publisher = DiscordPublisher('DISCORD_CHANNEL_ID_PLACEHOLDER')
+        state = self.make_state(
+            active_strategy='rev',
+            active_side='long',
+            exchange_position_side='long',
+            exchange_position_qty=0.5,
+            exchange_entry_price=2100.0,
+            stop_price=None,
+            tp_price=None,
+        )
+        payload = publisher.build_execution_confirmation(market=self.make_market(), state=state, result=result)
+        self.assertIn('执行确认', payload.content)
+        self.assertIn('动作: open', payload.content)
+        self.assertEqual(payload.metadata['kind'], 'execution_confirmation')
 
     def test_close_confirmation_payload_contains_realized_pnl_in_chinese(self) -> None:
         result = self.make_confirmed_result(action_type='close')
@@ -254,6 +316,24 @@ class PostTradeFreezeDiscordCase(unittest.TestCase):
         payload = publisher.build_execution_confirmation(market=self.make_market(), state=self.make_state(), result=result)
         self.assertIn('盈亏: 12.0', payload.content)
         self.assertIn('动作: close', payload.content)
+
+    def test_position_confirmed_close_result_can_build_payload(self) -> None:
+        result = self.make_confirmed_result(action_type='close')
+        result.confirmation_status = 'POSITION_CONFIRMED'
+        result.execution_phase = None
+        result.confirmed_order_status = 'FILLED'
+        result.post_position_side = None
+        result.post_position_qty = 0.0
+        result.post_entry_price = None
+        result.trade_summary = {
+            'confirmation_category': 'position_confirmed',
+            'fills': [{'realized_pnl': 1.23}],
+        }
+        publisher = DiscordPublisher('DISCORD_CHANNEL_ID_PLACEHOLDER')
+        payload = publisher.build_execution_confirmation(market=self.make_market(), state=self.make_state(), result=result)
+        self.assertIn('执行确认', payload.content)
+        self.assertIn('动作: close', payload.content)
+        self.assertEqual(payload.metadata['kind'], 'execution_confirmation')
 
     def test_rehearsal_message_schema_and_preview_are_separate(self) -> None:
         result = self.make_confirmed_result()
@@ -271,7 +351,19 @@ class PostTradeFreezeDiscordCase(unittest.TestCase):
     def test_build_dispatch_audit_contains_full_preview_and_idempotency_key(self) -> None:
         result = self.make_confirmed_result()
         publisher = DiscordPublisher('DISCORD_CHANNEL_ID_PLACEHOLDER')
-        audit = publisher.build_dispatch_audit(market=self.make_market(), state=self.make_state(), result=result)
+        audit = publisher.build_dispatch_audit(
+            market=self.make_market(),
+            state=self.make_state(
+                active_strategy='rev',
+                active_side='long',
+                exchange_position_side='long',
+                exchange_position_qty=0.5,
+                exchange_entry_price=2100.0,
+                stop_price=2050.0,
+                tp_price=2140.0,
+            ),
+            result=result,
+        )
         self.assertTrue(audit['eligible'])
         self.assertEqual(audit['dispatch']['target'], 'DISCORD_CHANNEL_ID_PLACEHOLDER')
         self.assertEqual(audit['kind'], 'execution_confirmation')
@@ -286,7 +378,15 @@ class PostTradeFreezeDiscordCase(unittest.TestCase):
         sender = MessageToolDiscordSender()
         attempt = publisher.send_via_bridge(
             market=self.make_market(),
-            state=self.make_state(),
+            state=self.make_state(
+                active_strategy='rev',
+                active_side='long',
+                exchange_position_side='long',
+                exchange_position_qty=0.5,
+                exchange_entry_price=2100.0,
+                stop_price=2050.0,
+                tp_price=2140.0,
+            ),
             result=result,
             sender=sender,
         )

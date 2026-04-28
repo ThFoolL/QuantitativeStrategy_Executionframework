@@ -6,6 +6,7 @@ import time
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from .binance_readonly import BinanceReadOnlyClient
@@ -30,6 +31,7 @@ from .runtime_worker import (
     BinancePreRunReconcileModule,
     EventLogWriter,
     RuntimeStatusStore,
+    RuntimeWorker,
     build_initial_state,
 )
 from .state_store import JsonStateStore
@@ -477,6 +479,19 @@ def _build_status_payload(
     }
 
 
+def _select_publishable_output_for_sampling(*, runtime: dict[str, Any], output: dict[str, Any]) -> dict[str, Any]:
+    worker_like = SimpleNamespace(state_store=runtime['state_store'])
+    worker_like._is_publishable_execution_result = lambda result: RuntimeWorker._is_publishable_execution_result(result)
+    worker_like._is_publishable_open_candidate = lambda result: RuntimeWorker._is_publishable_open_candidate(result)
+    worker_like._build_async_protective_close_publishable_candidate = lambda current_result, current_state, cached_result, plan_action: RuntimeWorker._build_async_protective_close_publishable_candidate(
+        current_result=current_result,
+        current_state=current_state,
+        cached_result=cached_result,
+        plan_action=plan_action,
+    )
+    return RuntimeWorker._select_publishable_output(worker_like, output)
+
+
 def _build_sender(config: Any) -> MessageToolDiscordSender:
     return MessageToolDiscordSender(
         real_send_enabled=bool(getattr(config, 'discord_real_send_enabled', False)),
@@ -490,9 +505,10 @@ def _build_sender(config: Any) -> MessageToolDiscordSender:
     )
 
 
-def _maybe_run_discord_sender(*, config: Any, output: dict[str, Any]) -> dict[str, Any] | None:
-    result_payload = output.get('result') or {}
-    state_payload = output.get('state') or {}
+def _maybe_run_discord_sender(*, config: Any, runtime: dict[str, Any], output: dict[str, Any]) -> dict[str, Any] | None:
+    publishable_output = _select_publishable_output_for_sampling(runtime=runtime, output=output)
+    result_payload = publishable_output.get('result') or {}
+    state_payload = publishable_output.get('state') or {}
     dispatch_preview = build_dispatch_preview(config, result_payload, state_payload)
     sender = _build_sender(config)
     primary_preview = dispatch_preview.get('primary_preview') or {}
@@ -545,10 +561,11 @@ def _maybe_run_discord_sender(*, config: Any, output: dict[str, Any]) -> dict[st
     }
 
 
-def _write_dispatch_preview(*, config: Any, runtime_status_path: Path, run_id: str, market: MarketSnapshot, output: dict[str, Any], discord_send_attempt: dict[str, Any] | None = None) -> str:
+def _write_dispatch_preview(*, config: Any, runtime: dict[str, Any], runtime_status_path: Path, run_id: str, market: MarketSnapshot, output: dict[str, Any], discord_send_attempt: dict[str, Any] | None = None) -> str:
     audit_dir = runtime_status_path.parent / 'dispatch_previews'
     audit_dir.mkdir(parents=True, exist_ok=True)
-    preview = build_dispatch_preview(config, output.get('result') or {}, output.get('state') or {})
+    publishable_output = _select_publishable_output_for_sampling(runtime=runtime, output=output)
+    preview = build_dispatch_preview(config, publishable_output.get('result') or {}, publishable_output.get('state') or {})
     payload = {
         'run_id': run_id,
         'symbol': market.symbol,
@@ -576,6 +593,7 @@ def _write_dispatch_preview(*, config: Any, runtime_status_path: Path, run_id: s
 def _write_receipts(
     *,
     config: Any,
+    runtime: dict[str, Any],
     audit_writer: AuditArtifactWriter,
     run_id: str,
     market: MarketSnapshot,
@@ -619,7 +637,11 @@ def _write_receipts(
         'symbol': market.symbol,
         'decision_ts': market.decision_ts,
         'dispatch_preview_path': dispatch_preview_path,
-        'dispatch_preview': build_dispatch_preview(config, result_payload, state_payload),
+        'dispatch_preview': build_dispatch_preview(
+            config,
+            _select_publishable_output_for_sampling(runtime=runtime, output=output).get('result') or {},
+            _select_publishable_output_for_sampling(runtime=runtime, output=output).get('state') or {},
+        ),
         'last_discord_send_attempt': discord_send_attempt,
         'config_validation': config_validation,
         'note': 'manual_real_trade_sampling_entry 已复用正式 runtime 主链；本次记录 preview/audit/receipt 与真实 Discord send 尝试对齐情况。',
@@ -685,6 +707,7 @@ def _execute_phase(
     phase_name: str,
     run_id: str,
     config: Any,
+    runtime: dict[str, Any],
     executor: BinanceRealExecutor,
     reconcile_module: BinancePreRunReconcileModule,
     state_store: JsonStateStore,
@@ -738,9 +761,10 @@ def _execute_phase(
         'result': asdict(output_result),
     }
     config_validation = validate_runtime_config(config).as_dict()
-    discord_send_attempt = _maybe_run_discord_sender(config=config, output=output)
+    discord_send_attempt = _maybe_run_discord_sender(config=config, runtime=runtime, output=output)
     dispatch_preview_path = _write_dispatch_preview(
         config=config,
+        runtime=runtime,
         runtime_status_path=runtime_status_store.path,
         run_id=run_id,
         market=market,
@@ -749,6 +773,7 @@ def _execute_phase(
     )
     audit_artifact_paths = _write_receipts(
         config=config,
+        runtime=runtime,
         audit_writer=audit_writer,
         run_id=run_id,
         market=market,
@@ -896,6 +921,14 @@ def main(argv: list[str] | None = None) -> int:
     readonly_client = BinanceReadOnlyClient(config)
     executor = BinanceRealExecutor(config=config, readonly_client=readonly_client)
     reconcile_module = BinancePreRunReconcileModule(operator_state_store, readonly_client)
+    runtime = {
+        'state_store': operator_state_store,
+        'runtime_status_store': runtime_status_store,
+        'event_log': event_log,
+        'audit_writer': audit_writer,
+        'readonly_client': readonly_client,
+        'runtime_dir': canonical_runtime_dir,
+    }
 
     _append_event(
         event_log,
@@ -952,6 +985,7 @@ def main(argv: list[str] | None = None) -> int:
         phase_name='open',
         run_id=f'{run_id}_open',
         config=config,
+        runtime=runtime,
         executor=executor,
         reconcile_module=reconcile_module,
         state_store=operator_state_store,
@@ -999,6 +1033,7 @@ def main(argv: list[str] | None = None) -> int:
         phase_name='close',
         run_id=f'{run_id}_close',
         config=config,
+        runtime=runtime,
         executor=executor,
         reconcile_module=reconcile_module,
         state_store=operator_state_store,

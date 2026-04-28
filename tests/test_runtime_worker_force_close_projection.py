@@ -17,6 +17,23 @@ from exec_framework.runtime_worker import RuntimeWorker, ReadonlyRecheckDecision
 
 
 class RuntimeWorkerForceCloseProjectionCase(unittest.TestCase):
+    def test_position_confirmed_open_candidate_is_publishable(self) -> None:
+        result_payload = {
+            'status': 'POSITION_CONFIRMED',
+            'action_type': 'open',
+            'confirmation_status': 'POSITION_CONFIRMED',
+            'confirmed_order_status': 'FILLED',
+            'execution_phase': 'position_confirmed_pending_trades',
+            'reconcile_status': 'OK',
+            'executed_qty': 0,
+            'post_position_side': 'long',
+            'post_position_qty': 0.021,
+            'post_entry_price': 2281.83,
+            'avg_fill_price': None,
+        }
+
+        self.assertTrue(RuntimeWorker._is_publishable_open_candidate(result_payload))
+
     def test_run_once_refreshes_output_result_after_recover_close_saved_last_result(self) -> None:
         state = LiveStateSnapshot(
             state_ts='2026-04-28T00:20:00+00:00',

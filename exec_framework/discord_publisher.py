@@ -501,23 +501,30 @@ class DiscordPublisher:
 
     @staticmethod
     def _open_like_publishable_phases() -> set[str]:
-        return {'confirmed', 'entry_confirmed_pending_protective'}
+        return {'confirmed', 'entry_confirmed_pending_protective', 'position_confirmed_pending_trades'}
 
     @classmethod
     def _should_prefer_execution_confirmation(cls, *, result: ExecutionResult) -> bool:
         open_like_actions = {'open', 'flip', 'add', 'trim'}
-        allowed_phase = (
-            result.execution_phase in cls._open_like_publishable_phases()
-            if result.action_type in open_like_actions
-            else result.execution_phase == 'confirmed'
-        )
+        if result.action_type in open_like_actions:
+            allowed_phase = result.execution_phase in cls._open_like_publishable_phases()
+        elif result.action_type == 'close':
+            allowed_phase = (
+                (result.confirmation_status == 'CONFIRMED' and result.execution_phase == 'confirmed')
+                or (result.confirmation_status == 'POSITION_CONFIRMED' and result.execution_phase in {None, '', 'none'})
+            )
+        else:
+            allowed_phase = result.execution_phase == 'confirmed'
+        allowed_confirmation_statuses = {'CONFIRMED'}
+        if result.action_type in open_like_actions or result.action_type == 'close':
+            allowed_confirmation_statuses.add('POSITION_CONFIRMED')
         if not (
             result.action_type in {'open', 'close', 'flip', 'add', 'trim'}
-            and result.confirmation_status == 'CONFIRMED'
+            and result.confirmation_status in allowed_confirmation_statuses
             and allowed_phase
             and result.confirmed_order_status in {'FILLED', 'PARTIALLY_FILLED', 'CONFIRMED'}
             and result.reconcile_status == 'OK'
-            and (result.avg_fill_price is not None or result.post_entry_price is not None)
+            and (result.avg_fill_price is not None or result.post_entry_price is not None or result.action_type == 'close')
         ):
             return False
         if result.action_type in {'open', 'flip', 'add', 'trim'}:
@@ -549,12 +556,15 @@ class DiscordPublisher:
             raise ValueError('protective evidence notes required for async protective close publish')
 
     def _assert_sendable_execution(self, result: ExecutionResult, state: LiveStateSnapshot) -> None:
+        open_like_actions = {'open', 'flip', 'add', 'trim'}
         if not self._should_prefer_execution_confirmation(result=result):
             if result.action_type not in {'open', 'close', 'flip', 'add', 'trim'}:
                 raise ValueError(f'action type not publishable as execution confirmation: {result.action_type}')
-            if result.confirmation_status != 'CONFIRMED':
+            allowed_confirmation_statuses = {'CONFIRMED'}
+            if result.action_type in open_like_actions:
+                allowed_confirmation_statuses.add('POSITION_CONFIRMED')
+            if result.confirmation_status not in allowed_confirmation_statuses:
                 raise ValueError(f'confirmation required before publish, got: {result.confirmation_status}')
-            open_like_actions = {'open', 'flip', 'add', 'trim'}
             allowed_phases = self._open_like_publishable_phases() if result.action_type in open_like_actions else {'confirmed'}
             if result.execution_phase not in allowed_phases:
                 raise ValueError(f'execution phase not publishable, got: {result.execution_phase}')
@@ -575,12 +585,17 @@ class DiscordPublisher:
                 raise ValueError(f'post position side invalid for open-like publish: {result.post_position_side}')
             if float(result.post_position_qty or 0.0) <= 0.0:
                 raise ValueError(f'post position qty invalid for open-like publish: {result.post_position_qty}')
-            if state.stop_price is None:
-                raise ValueError('stop_price is required for open-like execution confirmation')
-            strategy = getattr(state, 'active_strategy', None)
-            tp_price = getattr(state, 'tp_price', None)
-            if strategy != 'trend' and tp_price is None:
-                raise ValueError('tp_price is required for non-trend open-like execution confirmation')
+            return
+
+        if result.action_type == 'close':
+            if result.confirmation_status not in {'CONFIRMED', 'POSITION_CONFIRMED'}:
+                raise ValueError(f'confirmation required before publish, got: {result.confirmation_status}')
+            if result.confirmation_status == 'CONFIRMED' and result.execution_phase != 'confirmed':
+                raise ValueError(f'execution phase must be confirmed, got: {result.execution_phase}')
+            if result.confirmation_status == 'POSITION_CONFIRMED' and result.execution_phase not in {None, '', 'none'}:
+                raise ValueError(f'close position-confirmed execution phase invalid for publish, got: {result.execution_phase}')
+            if float(result.post_position_qty or 0.0) > 0.0:
+                raise ValueError(f'close publish requires flat post position qty, got: {result.post_position_qty}')
             return
 
         if result.confirmation_status != 'CONFIRMED':
@@ -592,6 +607,7 @@ class DiscordPublisher:
 
     def _collect_execution_blockers(self, *, result: ExecutionResult, state: LiveStateSnapshot) -> list[str]:
         blockers: list[str] = []
+        open_like_actions = {'open', 'flip', 'add', 'trim'}
         if state.runtime_mode == 'FROZEN' or result.should_freeze:
             blockers.append('frozen_runtime')
         if self.is_sendable_async_protective_close(result=result, state=state):
@@ -612,16 +628,26 @@ class DiscordPublisher:
                 blockers.append('post_position_side_invalid')
             if float(result.post_position_qty or 0.0) <= 0.0:
                 blockers.append('post_position_qty_invalid')
-            if state.stop_price is None:
-                blockers.append('stop_price_missing')
-            strategy = getattr(state, 'active_strategy', None)
-            if strategy != 'trend' and getattr(state, 'tp_price', None) is None:
-                blockers.append('tp_price_missing')
             return blockers
 
-        if result.confirmation_status != 'CONFIRMED':
+        if result.action_type == 'close':
+            if result.confirmation_status not in {'CONFIRMED', 'POSITION_CONFIRMED'}:
+                blockers.append('confirmation_not_confirmed')
+            elif result.confirmation_status == 'CONFIRMED' and result.execution_phase != 'confirmed':
+                blockers.append('execution_phase_not_publishable')
+            elif result.confirmation_status == 'POSITION_CONFIRMED' and result.execution_phase not in {None, '', 'none'}:
+                blockers.append('execution_phase_not_publishable')
+            if float(result.post_position_qty or 0.0) > 0.0:
+                blockers.append('post_position_qty_not_flat')
+            if result.confirmed_order_status not in {'FILLED', 'PARTIALLY_FILLED', 'CONFIRMED'}:
+                blockers.append('confirmed_order_status_invalid')
+            return blockers
+
+        allowed_confirmation_statuses = {'CONFIRMED'}
+        if result.action_type in open_like_actions:
+            allowed_confirmation_statuses.add('POSITION_CONFIRMED')
+        if result.confirmation_status not in allowed_confirmation_statuses:
             blockers.append('confirmation_not_confirmed')
-        open_like_actions = {'open', 'flip', 'add', 'trim'}
         allowed_phases = self._open_like_publishable_phases() if result.action_type in open_like_actions else {'confirmed'}
         if result.execution_phase not in allowed_phases:
             blockers.append('execution_phase_not_publishable')
