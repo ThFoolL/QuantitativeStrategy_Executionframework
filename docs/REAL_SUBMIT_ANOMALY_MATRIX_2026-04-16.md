@@ -18,13 +18,24 @@
 
 ### Full-chain closePosition protection
 
-- Sample: `docs/deploy_v6c/samples/manual_full_chain_acceptance/20260415T132514612652Z/20260415T132514612652Z_ETHUSDT_full_chain_acceptance_summary.json`
+- Historical sample: `docs/deploy_v6c/samples/manual_full_chain_acceptance/20260415T132514612652Z/20260415T132514612652Z_ETHUSDT_full_chain_acceptance_summary.json`
+- Latest passing sample after closepos acceptance fixes: `docs/deploy_v6c/samples/real_trade_sampling/manual_runs/20260416T140751979263Z/20260416T140751979263Z_ETHUSDT_full_chain_acceptance_summary.json`
 - Result: passed.
+- Fix closure for this round:
+  - blocker #1: `protective_rebuild` after management stop update could be exchange-visible only via algo-order lookup, but the confirmer still treated it as missing; `exec_framework/binance_posttrade.py` now accepts exchange-visible algo protective rows as confirmation fallback.
+  - blocker #2: `manual_full_chain_closepos_acceptance` could skip cleanup when close phase itself returned a non-OK / pending-confirm style result while the exchange was already drifting back toward flat; the script now triggers cleanup from result semantics, not only from final flat probe mismatch.
+  - new root cause: acceptance entry reused a polluted local runtime state even when the exchange was already flat; `exec_framework/manual_full_chain_closepos_acceptance.py` now forces a strict local flat-ready prepare step before opening the sample, clearing stale `pending_execution_phase` / freeze / protection intent.
 - Covered:
   - real entry
   - closePosition protective submission
   - management stop update -> protective rebuild
-  - final strict-flat-ready cleanup
+  - close phase auto-cleanup trigger
+  - pretrade strict-flat-ready prepare and final strict-flat-ready cleanup
+- Final closure observed in the passing sample:
+  - exchange end state: `position=0`, `open_orders=0`
+  - local runtime end state: `runtime_mode=ACTIVE`, `freeze_status=NONE`, `freeze_reason=null`, `pending_execution_phase=null`, `protective_order_status=NONE`
+- Remaining not fully closed in this slice:
+  - `filled_but_open_orders_still_live` remains in anomaly capture status; it is outside this closepos acceptance fix boundary.
 
 ### Protection semantic mismatch
 
