@@ -161,13 +161,16 @@ def _find_latest_artifact(path_str: str | None) -> dict[str, Any] | None:
         return None
 
 
-def _make_open_plan(*, side: str, quantity: float, current_price: float, stop_price: float) -> FinalActionPlan:
+def _make_open_plan(*, strategy: str, side: str, quantity: float, current_price: float, stop_price: float, tp_price: float | None = None) -> FinalActionPlan:
     now_iso = _utc_iso()
+    conflict_context: dict[str, Any] = {'manual_full_chain_acceptance': True}
+    if tp_price is not None:
+        conflict_context['tp_price'] = float(tp_price)
     return FinalActionPlan(
         plan_ts=now_iso,
         bar_ts=now_iso,
         action_type='open',
-        target_strategy='trend',
+        target_strategy=strategy,
         target_side=side,
         reason='manual_full_chain_acceptance_open',
         qty_mode='manual_target_notional',
@@ -175,7 +178,7 @@ def _make_open_plan(*, side: str, quantity: float, current_price: float, stop_pr
         price_hint=float(current_price),
         stop_price=float(stop_price),
         risk_fraction=0.1,
-        conflict_context={'manual_full_chain_acceptance': True},
+        conflict_context=conflict_context,
         requires_execution=True,
         close_reason=None,
     )
@@ -614,8 +617,11 @@ def main() -> int:
     parser.add_argument('--env-file', required=True)
     parser.add_argument('--symbol', default='ETHUSDT')
     parser.add_argument('--side', choices=['long', 'short'], default='long')
+    parser.add_argument('--strategy', choices=['trend', 'rev'], default='trend')
     parser.add_argument('--target-notional', type=float, default=21.0)
     parser.add_argument('--hold-seconds', type=float, default=2.0)
+    parser.add_argument('--tp-price', type=float, default=None)
+    parser.add_argument('--tp-r-multiple', type=float, default=1.0)
     parser.add_argument('--out-dir', default='docs/deploy_v6c/samples/real_trade_sampling/manual_runs')
     args = parser.parse_args()
 
@@ -641,8 +647,11 @@ def main() -> int:
         'run_id': run_id,
         'symbol': str(args.symbol).upper(),
         'side': args.side,
+        'strategy': args.strategy,
         'target_notional': float(args.target_notional),
         'hold_seconds': float(args.hold_seconds),
+        'tp_price': float(args.tp_price) if args.tp_price is not None else None,
+        'tp_r_multiple': float(args.tp_r_multiple),
         'env_file': str(env_file),
         'runtime_dir': str(runtime_dir),
         'config_validation': config_validation,
@@ -672,8 +681,16 @@ def main() -> int:
         symbol=args.symbol,
     )
     stop_price = round(open_price * (0.99 if args.side == 'long' else 1.01), 2)
+    tp_price = None
+    if args.strategy == 'rev':
+        if args.tp_price is not None:
+            tp_price = round(float(args.tp_price), 2)
+        else:
+            risk_per_unit = abs(float(open_price) - float(stop_price))
+            tp_direction = 1.0 if args.side == 'long' else -1.0
+            tp_price = round(float(open_price) + tp_direction * risk_per_unit * float(args.tp_r_multiple), 2)
     open_market = _build_manual_market(symbol=args.symbol, current_price=open_price)
-    open_plan = _make_open_plan(side=args.side, quantity=quantity, current_price=open_price, stop_price=stop_price)
+    open_plan = _make_open_plan(strategy=args.strategy, side=args.side, quantity=quantity, current_price=open_price, stop_price=stop_price, tp_price=tp_price)
 
     open_phase = _execute_phase(
         phase_name='open',

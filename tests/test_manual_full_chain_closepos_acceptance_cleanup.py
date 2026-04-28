@@ -11,10 +11,86 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from exec_framework import manual_full_chain_closepos_acceptance as module
+from exec_framework import manual_real_trade_sampling_entry as sampling_module
 from exec_framework.models import LiveStateSnapshot
 
 
 class ManualFullChainAcceptanceCleanupCase(unittest.TestCase):
+    def test_sampling_select_publishable_output_uses_cached_publishable_result(self) -> None:
+        class StubStore:
+            def __init__(self):
+                self._state = SimpleNamespace(last_publishable_result={
+                    'status': 'FILLED',
+                    'action_type': 'open',
+                    'confirmation_status': 'POSITION_CONFIRMED',
+                    'confirmed_order_status': 'FILLED',
+                    'execution_phase': 'position_confirmed_pending_trades',
+                    'post_position_side': 'long',
+                    'post_position_qty': 0.021,
+                    'post_entry_price': 2284.27,
+                    'reconcile_status': 'OK',
+                })
+
+            def load_state(self):
+                return self._state
+
+            def save_state(self, new_state):
+                self._state = new_state
+
+        runtime = {'state_store': StubStore()}
+        output = {
+            'state': {
+                'runtime_mode': 'ACTIVE',
+                'freeze_status': 'NONE',
+                'freeze_reason': None,
+                'pending_execution_phase': 'position_confirmed_pending_trades',
+                'exchange_position_side': 'long',
+                'exchange_position_qty': 0.021,
+                'last_publishable_result': runtime['state_store']._state.last_publishable_result,
+                'stop_price': 2250.0,
+                'tp_price': 2310.0,
+                'active_strategy': 'manual_real_trade_sampling',
+            },
+            'plan': {'action_type': 'hold', 'reason': 'await_more_exchange_facts'},
+            'result': {
+                'status': 'POSITION_CONFIRMED',
+                'action_type': 'state_update',
+                'confirmation_status': 'POSITION_CONFIRMED',
+                'confirmed_order_status': 'FILLED',
+                'execution_phase': 'position_confirmed_pending_trades',
+                'reconcile_status': 'OK',
+            },
+        }
+
+        publishable = sampling_module._select_publishable_output_for_sampling(runtime=runtime, output=output)
+
+        self.assertEqual(publishable['result']['action_type'], 'open')
+        self.assertEqual(publishable['result']['post_position_side'], 'long')
+        self.assertEqual(publishable['result']['status'], 'FILLED')
+
+    def test_make_open_plan_rev_carries_tp_price(self) -> None:
+        plan = module._make_open_plan(
+            strategy='rev',
+            side='long',
+            quantity=0.02,
+            current_price=2300.0,
+            stop_price=2277.0,
+            tp_price=2323.0,
+        )
+        self.assertEqual(plan.target_strategy, 'rev')
+        self.assertEqual(plan.conflict_context.get('tp_price'), 2323.0)
+
+    def test_make_open_plan_trend_leaves_tp_price_empty(self) -> None:
+        plan = module._make_open_plan(
+            strategy='trend',
+            side='long',
+            quantity=0.02,
+            current_price=2300.0,
+            stop_price=2277.0,
+        )
+        self.assertEqual(plan.target_strategy, 'trend')
+        self.assertNotIn('tp_price', plan.conflict_context)
+
     def test_attempt_cleanup_close_runs_when_close_failed_but_exchange_already_flat(self) -> None:
         runtime = {'readonly_client': object()}
         summary: dict[str, object] = {}
