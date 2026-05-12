@@ -34,6 +34,17 @@ def build_initial_state() -> LiveStateSnapshot:
         strategy_entry_price=None,
         stop_price=None,
         risk_fraction=None,
+        strategy_ref_entry_price=None,
+        strategy_ref_risk_per_unit=None,
+        strategy_ref_base_quantity=None,
+        strategy_ref_notional=None,
+        strategy_ref_risk_amount=None,
+        execution_entry_price=None,
+        execution_risk_per_unit=None,
+        execution_quantity=None,
+        execution_notional=None,
+        execution_risk_amount=None,
+        execution_high_water_r=0.0,
     )
 
 

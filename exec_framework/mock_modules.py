@@ -11,6 +11,7 @@ STATE_UPDATE_WHITELIST = {
     'rev_window',
     'hold_bars',
     'high_water_r',
+    'execution_high_water_r',
     'degrade_state',
     'p1_armed',
     'p2_armed',
@@ -18,6 +19,8 @@ STATE_UPDATE_WHITELIST = {
     'equity_at_entry',
     'risk_amount',
     'risk_per_unit',
+    'execution_risk_amount',
+    'execution_risk_per_unit',
     'pending_execution_phase',
     'last_conflict_resolution',
 }
@@ -97,6 +100,7 @@ class MockExecutorModule:
                 notional = min(quantity * float(plan.price_hint), equity_at_entry * DEFAULT_LEVERAGE)
                 quantity = notional / max(float(plan.price_hint), 1e-12)
                 risk_amount = risk_per_unit * quantity
+            execution_notional = quantity * float(plan.price_hint) if (plan.price_hint is not None and quantity > 0) else None
             updates.update({
                 'tp_price': None,
                 'hold_bars': 0,
@@ -111,6 +115,17 @@ class MockExecutorModule:
                 'p1_armed': False,
                 'p2_armed': False,
                 'high_water_r': 0.0,
+                'strategy_ref_entry_price': plan.price_hint,
+                'strategy_ref_risk_per_unit': risk_per_unit,
+                'strategy_ref_base_quantity': quantity,
+                'strategy_ref_notional': execution_notional,
+                'strategy_ref_risk_amount': risk_amount,
+                'execution_entry_price': plan.price_hint,
+                'execution_risk_per_unit': risk_per_unit,
+                'execution_quantity': quantity,
+                'execution_notional': execution_notional,
+                'execution_risk_amount': risk_amount,
+                'execution_high_water_r': 0.0,
                 'last_trend_signal_ts': signal_ts,
             })
         elif plan.target_strategy == 'rev':
@@ -126,6 +141,17 @@ class MockExecutorModule:
                 'p1_armed': False,
                 'p2_armed': False,
                 'high_water_r': 0.0,
+                'strategy_ref_entry_price': plan.price_hint,
+                'strategy_ref_risk_per_unit': None,
+                'strategy_ref_base_quantity': None,
+                'strategy_ref_notional': None,
+                'strategy_ref_risk_amount': None,
+                'execution_entry_price': plan.price_hint,
+                'execution_risk_per_unit': None,
+                'execution_quantity': None,
+                'execution_notional': None,
+                'execution_risk_amount': None,
+                'execution_high_water_r': 0.0,
             })
         return updates
 
@@ -150,6 +176,17 @@ class MockExecutorModule:
             'p1_armed': False,
             'p2_armed': False,
             'high_water_r': 0.0,
+            'strategy_ref_entry_price': None,
+            'strategy_ref_risk_per_unit': None,
+            'strategy_ref_base_quantity': None,
+            'strategy_ref_notional': None,
+            'strategy_ref_risk_amount': None,
+            'execution_entry_price': None,
+            'execution_risk_per_unit': None,
+            'execution_quantity': None,
+            'execution_notional': None,
+            'execution_risk_amount': None,
+            'execution_high_water_r': 0.0,
         }
 
     def execute(self, plan: FinalActionPlan, market: MarketSnapshot, state: LiveStateSnapshot) -> ExecutionResult:
@@ -216,6 +253,10 @@ class MockExecutorModule:
                         'base_quantity': total_qty,
                         'risk_amount': float(state.risk_amount or 0.0) + add_risk_budget,
                         'stop_price': protective_stop,
+                        'execution_entry_price': weighted_entry,
+                        'execution_quantity': total_qty,
+                        'execution_notional': weighted_entry * total_qty,
+                        'execution_risk_amount': float(state.execution_risk_amount or state.risk_amount or 0.0) + add_risk_budget,
                     })
         elif plan.action_type == 'trim':
             state_updates = {
@@ -225,7 +266,11 @@ class MockExecutorModule:
                 state_updates['stop_price'] = plan.stop_price
             if plan.qty is not None and state.base_quantity is not None:
                 remaining_fraction = max(0.0, 1.0 - float(plan.qty))
-                state_updates['base_quantity'] = float(state.base_quantity) * remaining_fraction
+                remaining_qty = float(state.base_quantity) * remaining_fraction
+                state_updates['base_quantity'] = remaining_qty
+                state_updates['execution_quantity'] = remaining_qty
+                if state.execution_entry_price is not None:
+                    state_updates['execution_notional'] = float(state.execution_entry_price) * remaining_qty
             state_updates.update(self._filter_state_patch(plan.conflict_context))
 
         return ExecutionResult(
