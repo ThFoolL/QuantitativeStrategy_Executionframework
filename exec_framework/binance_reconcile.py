@@ -294,6 +294,21 @@ def reconcile_pre_run(payload: ReconcileInput) -> ReconcileDecision:
         and float(payload.last_result.post_position_qty or 0.0) > payload.qty_tolerance
     )
 
+    recover_check = dict(state.recover_check or {})
+    recover_confirm_context = dict(recover_check.get('confirm_context') or {})
+    recover_pending_cleanup_window = bool(
+        state.pending_execution_phase == 'frozen'
+        and recover_check.get('source') == 'execution_confirm_async_operation'
+        and recover_check.get('reason') == 'recover_ready'
+        and recover_check.get('stop_condition') == 'await_more_exchange_facts'
+        and (
+            recover_confirm_context.get('confirmation_status') in {'CONFIRMED', 'POSITION_CONFIRMED'}
+            or recover_confirm_context.get('stop_condition') == 'terminal_confirmation_reached'
+        )
+        and recover_confirm_context.get('post_position_side') in {'long', 'short'}
+        and float(recover_confirm_context.get('post_position_qty') or 0.0) > payload.qty_tolerance
+    )
+
     in_confirmed_pending_window = bool(
         state.exchange_position_side in {'long', 'short'}
         and float(state.exchange_position_qty or 0.0) > payload.qty_tolerance
@@ -314,6 +329,7 @@ def reconcile_pre_run(payload: ReconcileInput) -> ReconcileDecision:
                 'entry_confirmed_pending_protective',
                 'management_stop_update_pending_protective',
             }
+            or recover_pending_cleanup_window
         )
     )
     if in_confirmed_pending_window and exchange_side is None and exchange_qty <= payload.qty_tolerance:
@@ -327,6 +343,7 @@ def reconcile_pre_run(payload: ReconcileInput) -> ReconcileDecision:
                 'entry_confirmed_pending_protective',
                 'management_stop_update_pending_protective',
             }
+            or recover_pending_cleanup_window
         )
         if refresh_gap_supported:
             notes.append('exchange_position_refresh_gap_observed')

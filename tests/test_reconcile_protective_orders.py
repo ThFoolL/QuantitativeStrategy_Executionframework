@@ -234,6 +234,64 @@ class ReconcileProtectiveOrdersCase(unittest.TestCase):
         self.assertEqual(decision.stop_condition, STOP_CONDITION_PROTECTION_TP_MISSING)
         self.assertIn('partial_protective_missing', decision.notes)
 
+    def test_reconcile_keeps_flat_lingering_confirm_cleanup_as_pending_instead_of_presence_mismatch(self) -> None:
+        state = self.make_state()
+        state.consistency_status = 'MISMATCH'
+        state.freeze_reason = 'local_exchange_position_presence_mismatch'
+        state.runtime_mode = 'FROZEN'
+        state.freeze_status = 'ACTIVE'
+        state.pending_execution_phase = 'frozen'
+        state.exchange_position_side = 'short'
+        state.exchange_position_qty = 0.864
+        state.active_strategy = 'rev'
+        state.active_side = 'short'
+        state.strategy_entry_price = 2335.06
+        state.base_quantity = 0.864
+        state.position_confirmation_level = 'TRADES_CONFIRMED'
+        state.trade_confirmation_level = 'TRADES_CONFIRMED'
+        state.fills_reconciled = True
+        state.exchange_protective_orders = [self.protective_order()]
+        state.protective_order_status = 'ACTIVE'
+        state.protective_phase_status = 'ACTIVE'
+        state.recover_check = {
+            'checked_at': '2026-05-11T19:00:00+00:00',
+            'source': 'execution_confirm_async_operation',
+            'result': 'READY',
+            'allowed': True,
+            'reason': 'recover_ready',
+            'pending_execution_phase': 'confirmed',
+            'consistency_status': 'OK',
+            'runtime_mode': 'ACTIVE',
+            'recover_ready': True,
+            'requires_manual_resume': True,
+            'recover_policy': 'ready_only',
+            'recover_stage': 'recover_ready',
+            'stop_reason': 'recover_ready',
+            'stop_condition': 'await_more_exchange_facts',
+            'confirm_phase': 'posttrade_confirm',
+            'confirm_context': {
+                'confirmation_status': 'CONFIRMED',
+                'confirm_phase': 'posttrade_confirm',
+                'stop_reason': 'confirmed',
+                'stop_condition': 'terminal_confirmation_reached',
+                'post_position_side': 'short',
+                'post_position_qty': 0.864,
+            },
+        }
+        decision = reconcile_pre_run(
+            ReconcileInput(
+                state=state,
+                exchange=ExchangeSnapshot(
+                    account=AccountSnapshot(account_equity=1000.0, available_margin=900.0, raw={}),
+                    position=PositionSnapshot(symbol='ETHUSDT', side=None, qty=0.0, entry_price=None, raw={}),
+                    open_orders=[],
+                ),
+            )
+        )
+        self.assertEqual(decision.status, 'PENDING_ORDER')
+        self.assertEqual(decision.freeze_reason, 'position_confirmed_pending_trades')
+        self.assertIn('exchange_position_refresh_gap_observed', decision.notes)
+
     def test_reconcile_realistic_tp_missing_stop_snapshot_keeps_partial_missing_not_generic_missing(self) -> None:
         state = self.make_state()
         state.active_strategy = 'rev'

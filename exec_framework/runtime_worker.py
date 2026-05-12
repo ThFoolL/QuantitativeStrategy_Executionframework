@@ -2636,24 +2636,42 @@ class RuntimeWorker:
             )
         cancel_result = executor._cancel_existing_protective_orders(cancel_requests)
         if not cancel_result.get('ok'):
-            reason = f"protective_cleanup_cancel_failed:{cancel_result.get('reason') or 'unknown'}"
-            self.event_log.append(
-                'recover_result',
-                {
-                    'run_id': run_id,
+            refreshed_orders = self._fetch_exchange_open_orders(self.config.symbol)
+            refreshed_protective_orders, _ = split_open_orders(refreshed_orders)
+            if not refreshed_protective_orders:
+                cancel_result = {
+                    **dict(cancel_result or {}),
+                    'ok': True,
+                    'reason': None,
+                    'fact_cleanup_after_failed_cancel': True,
+                    'receipts': list(cancel_result.get('receipts') or []),
+                }
+                self.event_log.append(
+                    'protective_cleanup_fact_reset_after_failed_cancel',
+                    {
+                        'run_id': run_id,
+                        'cancel_result': cancel_result,
+                    },
+                )
+            else:
+                reason = f"protective_cleanup_cancel_failed:{cancel_result.get('reason') or 'unknown'}"
+                self.event_log.append(
+                    'recover_result',
+                    {
+                        'run_id': run_id,
+                        'allowed': False,
+                        'result': 'BLOCKED',
+                        'reason': reason,
+                        'recover_check': state.recover_check,
+                        'recover_timeline_tail': state.recover_timeline[-3:],
+                    },
+                )
+                return {
                     'allowed': False,
                     'result': 'BLOCKED',
                     'reason': reason,
                     'recover_check': state.recover_check,
-                    'recover_timeline_tail': state.recover_timeline[-3:],
-                },
-            )
-            return {
-                'allowed': False,
-                'result': 'BLOCKED',
-                'reason': reason,
-                'recover_check': state.recover_check,
-            }
+                }
         receipts = [
             {
                 'ok': True,

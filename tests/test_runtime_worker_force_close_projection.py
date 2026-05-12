@@ -321,6 +321,99 @@ class RuntimeWorkerForceCloseProjectionCase(unittest.TestCase):
         self.assertEqual(recover_check['risk_action'], 'FORCE_CLOSE')
         self.assertEqual(recover_check['stop_condition'], 'position_open_without_protection')
 
+    def test_lingering_protective_cleanup_reaches_flat_reset_when_cancel_failed_but_exchange_has_no_orders(self) -> None:
+        state = LiveStateSnapshot(
+            state_ts='2026-05-11T20:15:00+00:00',
+            consistency_status='MISMATCH',
+            freeze_reason='local_exchange_position_presence_mismatch',
+            account_equity=1000.0,
+            available_margin=900.0,
+            exchange_position_side=None,
+            exchange_position_qty=0.0,
+            exchange_entry_price=0.0,
+            active_strategy='rev',
+            active_side='short',
+            strategy_entry_time='2026-05-11T19:00:00+00:00',
+            strategy_entry_price=2335.06,
+            stop_price=2343.31,
+            tp_price=2325.19,
+            risk_fraction=0.1,
+            runtime_mode='FROZEN',
+            freeze_status='ACTIVE',
+            pending_execution_phase='frozen',
+            base_quantity=0.864,
+            protective_order_status='ACTIVE',
+            exchange_protective_orders=[
+                {'order_id': 'oid-stop', 'client_order_id': 'cid-stop', 'kind': 'hard_stop'},
+                {'order_id': 'oid-tp', 'client_order_id': 'cid-tp', 'kind': 'take_profit'},
+            ],
+            recover_check={
+                'checked_at': '2026-05-11T19:00:00+00:00',
+                'source': 'execution_confirm_async_operation',
+                'result': 'READY',
+                'allowed': True,
+                'reason': 'recover_ready',
+                'pending_execution_phase': 'confirmed',
+                'consistency_status': 'OK',
+                'runtime_mode': 'ACTIVE',
+            },
+        )
+
+        class StubStore:
+            def __init__(self, initial_state):
+                self.state = initial_state
+
+            def load_state(self):
+                return self.state
+
+            def save_state(self, new_state):
+                self.state = new_state
+
+        class StubExecutor:
+            def _cancel_existing_protective_orders(self, cancel_requests):
+                return {
+                    'ok': False,
+                    'reason': 'protective_cancel_failed',
+                    'cancel_count': len(cancel_requests),
+                    'receipts': [
+                        {
+                            'client_order_id': 'cid-stop',
+                            'exchange_order_id': 'oid-stop',
+                            'canceled': False,
+                            'cancel_status': 'ERROR',
+                            'error_message': 'Order does not exist.',
+                        }
+                    ],
+                }
+
+        event_rows = []
+        store = StubStore(state)
+        with patch('exec_framework.runtime_worker.BinanceRealExecutor', StubExecutor):
+            worker = RuntimeWorker(
+                config=SimpleNamespace(symbol='ETHUSDT'),
+                market_provider=None,
+                engine=SimpleNamespace(executor_module=StubExecutor()),
+                state_store=store,
+                status_store=SimpleNamespace(path=Path('runtime/runtime_status.json'), write=lambda payload: None),
+                event_log=SimpleNamespace(path=Path('runtime/event_log.jsonl'), append=lambda *args, **kwargs: event_rows.append((args, kwargs))),
+                scheduler=SimpleNamespace(),
+            )
+            worker.freeze_controller = SimpleNamespace(evaluate_recover=lambda current_state: None)
+            worker._fetch_exchange_open_orders = lambda symbol: []
+
+            result = worker._maybe_cleanup_lingering_protective_orders(state=state, run_id='run-1')
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result['result'], 'RECOVERED')
+        self.assertEqual(result['reason'], 'canceled_lingering_protective_orders_after_flat')
+        next_state = store.state
+        self.assertEqual(next_state.runtime_mode, 'ACTIVE')
+        self.assertEqual(next_state.freeze_status, 'NONE')
+        self.assertIsNone(next_state.freeze_reason)
+        self.assertIsNone(next_state.pending_execution_phase)
+        self.assertEqual(next_state.exchange_protective_orders, [])
+        self.assertEqual(next_state.protective_order_status, 'NONE')
+
 
 if __name__ == '__main__':
     unittest.main()
