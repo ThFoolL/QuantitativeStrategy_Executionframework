@@ -20,7 +20,7 @@ class BinanceEnvConfig:
     api_secret: str
     base_url: str = 'https://fapi.binance.com'
     symbol: str = DEFAULT_BINANCE_SYMBOL
-    strategy_adapter: str = 'la_free_v1'
+    strategy_adapter: str = 'baseline'
     recv_window_ms: int = 10000
     submit_enabled: bool = False
     dry_run: bool = True
@@ -151,7 +151,7 @@ def load_binance_env(env_path: str | Path | None = None) -> BinanceEnvConfig:
         api_secret=os.environ['BINANCE_API_SECRET'],
         base_url=_clean_str(os.environ.get('BINANCE_BASE_URL'), 'https://fapi.binance.com'),
         symbol=_clean_str(os.environ.get('BINANCE_SYMBOL'), DEFAULT_BINANCE_SYMBOL),
-        strategy_adapter=_clean_str(os.environ.get('LIVE_STRATEGY_ADAPTER'), 'la_free_v1'),
+        strategy_adapter=_clean_str(os.environ.get('LIVE_STRATEGY_ADAPTER'), 'baseline'),
         recv_window_ms=_parse_int(os.environ.get('BINANCE_RECV_WINDOW_MS'), 10000),
         submit_enabled=_parse_bool(os.environ.get('BINANCE_SUBMIT_ENABLED'), False),
         dry_run=_parse_bool(os.environ.get('BINANCE_DRY_RUN'), True),

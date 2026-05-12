@@ -4,7 +4,7 @@ from .runtime_env import BinanceEnvConfig
 from .v6c_adapter import V6CLiveAdapter
 from .v6c_la_free_v1_adapter import V6CLAFreeV1LiveAdapter
 
-DEFAULT_STRATEGY_ADAPTER = 'la_free_v1'
+DEFAULT_STRATEGY_ADAPTER = 'baseline'
 SUPPORTED_STRATEGY_ADAPTERS = ('baseline', 'la_free_v1')
 
 

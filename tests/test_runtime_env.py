@@ -52,7 +52,7 @@ class RuntimeEnvCase(unittest.TestCase):
             self.assertEqual(config.base_url, 'https://fapi.binance.com')
             self.assertEqual(config.symbol, DEFAULT_BINANCE_SYMBOL)
             self.assertEqual(config.state_path, 'runtime/state.json')
-            self.assertEqual(config.discord_execution_channel_id, 'DISCORD_CHANNEL_ID_PLACEHOLDER')
+            self.assertEqual(config.discord_execution_channel_id, '1486034825830727710')
             self.assertFalse(config.discord_real_send_enabled)
             self.assertFalse(config.discord_message_tool_enabled)
             self.assertTrue(config.discord_send_require_idempotency)

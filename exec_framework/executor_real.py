@@ -2097,6 +2097,8 @@ class BinanceRealExecutor:
         if risk_per_unit is not None and confirmation.post_position_qty and confirmation.post_position_qty > 0:
             risk_amount = float(confirmation.post_position_qty) * risk_per_unit
 
+        base_quantity = float(confirmation.post_position_qty or 0.0)
+        execution_notional = (float(entry_price) * base_quantity) if entry_price is not None else None
         updates: dict[str, Any] = {
             'active_strategy': plan.target_strategy or 'none',
             'active_side': confirmation.post_position_side or plan.target_side,
@@ -2105,13 +2107,24 @@ class BinanceRealExecutor:
             'stop_price': stop_price,
             'risk_fraction': plan.risk_fraction,
             'last_signal_bar': market.bar_ts,
-            'base_quantity': float(confirmation.post_position_qty or 0.0),
+            'base_quantity': base_quantity,
             'equity_at_entry': None,
             'risk_amount': risk_amount,
             'risk_per_unit': risk_per_unit,
             'p1_armed': False,
             'p2_armed': False,
             'high_water_r': 0.0,
+            'strategy_ref_entry_price': entry_price,
+            'strategy_ref_risk_per_unit': risk_per_unit,
+            'strategy_ref_base_quantity': base_quantity,
+            'strategy_ref_notional': execution_notional,
+            'strategy_ref_risk_amount': risk_amount,
+            'execution_entry_price': entry_price,
+            'execution_risk_per_unit': risk_per_unit,
+            'execution_quantity': base_quantity,
+            'execution_notional': execution_notional,
+            'execution_risk_amount': risk_amount,
+            'execution_high_water_r': 0.0,
         }
         if plan.target_strategy == 'trend':
             quality_bucket = 'HIGH' if (plan.risk_fraction or 0.0) >= 0.16 else 'MEDIUM'
@@ -2145,12 +2158,22 @@ class BinanceRealExecutor:
         confirmation: PostTradeConfirmation,
         state: LiveStateSnapshot,
     ) -> dict[str, Any]:
+        post_qty = float(confirmation.post_position_qty or 0.0)
+        post_entry = confirmation.post_entry_price if confirmation.post_entry_price is not None else confirmation.avg_fill_price
+        execution_notional = (float(post_entry) * post_qty) if post_entry is not None else None
+        execution_risk_per_unit = state.execution_risk_per_unit if state.execution_risk_per_unit is not None else state.risk_per_unit
+        execution_risk_amount = (execution_risk_per_unit * post_qty) if (execution_risk_per_unit is not None and post_qty > 0) else state.execution_risk_amount
         updates: dict[str, Any] = {
             'active_side': confirmation.post_position_side or plan.target_side,
-            'base_quantity': float(confirmation.post_position_qty or 0.0),
-            'strategy_entry_price': confirmation.post_entry_price if confirmation.post_entry_price is not None else confirmation.avg_fill_price,
+            'base_quantity': post_qty,
+            'strategy_entry_price': post_entry,
             'last_signal_bar': market.bar_ts,
             'add_on_count': int(state.add_on_count or 0) + 1,
+            'execution_entry_price': post_entry,
+            'execution_quantity': post_qty,
+            'execution_notional': execution_notional,
+            'execution_risk_per_unit': execution_risk_per_unit,
+            'execution_risk_amount': execution_risk_amount,
         }
         if plan.stop_price is not None:
             updates['stop_price'] = plan.stop_price
@@ -2464,10 +2487,12 @@ class BinanceRealExecutor:
         symbol_rules: ExchangeSymbolRules,
     ) -> float | None:
         if action_type in {'close', 'flip'}:
-            return state.exchange_position_qty or state.base_quantity
+            return state.exchange_position_qty or state.execution_quantity or state.base_quantity
         if action_type == 'trim':
             if state.exchange_position_qty > 0 and plan.qty is not None:
                 return state.exchange_position_qty * float(plan.qty)
+            if state.execution_quantity is not None and plan.qty is not None:
+                return float(state.execution_quantity) * float(plan.qty)
             if state.base_quantity is not None and plan.qty is not None:
                 return float(state.base_quantity) * float(plan.qty)
             return None
@@ -2475,7 +2500,7 @@ class BinanceRealExecutor:
             return self._resolve_risk_based_quantity(plan=plan, state=state, market=market, symbol_rules=symbol_rules)
         if plan.qty is not None:
             return float(plan.qty)
-        return state.base_quantity
+        return state.execution_quantity if state.execution_quantity is not None else state.base_quantity
 
     def _resolve_risk_based_quantity(
         self,
@@ -2517,8 +2542,10 @@ class BinanceRealExecutor:
         if leverage_like_cap is not None and leverage_like_cap > 0:
             max_notional = leverage_like_cap if max_notional is None else min(max_notional, leverage_like_cap)
 
-        if plan.qty_mode == 'risk_based_add' and state.active_strategy == 'trend' and state.active_side and state.strategy_entry_price is not None and state.stop_price is not None and state.base_quantity is not None:
-            existing_notional = float(state.base_quantity) * float(state.strategy_entry_price)
+        effective_entry_price = state.execution_entry_price if state.execution_entry_price is not None else state.strategy_entry_price
+        effective_quantity = state.execution_quantity if state.execution_quantity is not None else state.base_quantity
+        if plan.qty_mode == 'risk_based_add' and state.active_strategy == 'trend' and state.active_side and effective_entry_price is not None and state.stop_price is not None and effective_quantity is not None:
+            existing_notional = float(effective_quantity) * float(effective_entry_price)
             if max_notional is not None:
                 remaining_notional = max(max_notional - existing_notional, 0.0)
                 raw_quantity = min(raw_quantity, remaining_notional / entry_price)
@@ -2547,6 +2574,7 @@ class BinanceRealExecutor:
             'qty_mode': plan.qty_mode,
             'plan_qty': plan.qty,
             'state_base_quantity': state.base_quantity,
+            'state_execution_quantity': state.execution_quantity,
             'state_exchange_position_qty': state.exchange_position_qty,
             'risk_fraction': plan.risk_fraction,
             'account_equity': state.account_equity,
@@ -2578,6 +2606,7 @@ class BinanceRealExecutor:
             'qty_mode',
             'plan_qty',
             'state_base_quantity',
+            'state_execution_quantity',
             'state_exchange_position_qty',
             'risk_fraction',
             'account_equity',
@@ -2755,6 +2784,7 @@ class BinanceRealExecutor:
             'state_position_side': state.exchange_position_side,
             'state_position_qty': state.exchange_position_qty,
             'state_base_quantity': state.base_quantity,
+            'state_execution_quantity': state.execution_quantity,
             'state_account_equity': state.account_equity,
             'request_count': len(order_requests),
             'primary_request_count': len(primary_order_requests),

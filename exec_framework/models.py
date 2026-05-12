@@ -52,6 +52,17 @@ class LiveStateSnapshot:
     p1_armed: bool = False
     p2_armed: bool = False
     high_water_r: float = 0.0
+    strategy_ref_entry_price: Optional[float] = None
+    strategy_ref_risk_per_unit: Optional[float] = None
+    strategy_ref_base_quantity: Optional[float] = None
+    strategy_ref_notional: Optional[float] = None
+    strategy_ref_risk_amount: Optional[float] = None
+    execution_entry_price: Optional[float] = None
+    execution_risk_per_unit: Optional[float] = None
+    execution_quantity: Optional[float] = None
+    execution_notional: Optional[float] = None
+    execution_risk_amount: Optional[float] = None
+    execution_high_water_r: float = 0.0
     last_signal_bar: Optional[str] = None
     last_trend_signal_ts: Optional[str] = None
     last_processed_strategy_ts: Optional[str] = None
