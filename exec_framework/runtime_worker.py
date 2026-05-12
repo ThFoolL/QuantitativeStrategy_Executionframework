@@ -757,14 +757,19 @@ class RuntimeWorker:
 
     def run_daemon(self, *, max_cycles: int | None = None, sleep: bool = True) -> int:
         cycles = 0
+        first_cycle = True
         while max_cycles is None or cycles < max_cycles:
             now = datetime.now(timezone.utc)
             wait_delay_seconds = self._select_runtime_wait_delay_seconds()
             if wait_delay_seconds > 0 and sleep:
                 time.sleep(wait_delay_seconds)
-            scheduled_run = self.scheduler.next_run_at(datetime.now(timezone.utc))
-            if sleep:
-                time.sleep(max((scheduled_run - datetime.now(timezone.utc)).total_seconds(), 0.0))
+            if first_cycle:
+                scheduled_run = datetime.now(timezone.utc)
+                first_cycle = False
+            else:
+                scheduled_run = self.scheduler.next_run_at(datetime.now(timezone.utc))
+                if sleep:
+                    time.sleep(max((scheduled_run - datetime.now(timezone.utc)).total_seconds(), 0.0))
             self.run_once(scheduled_run)
             cycles += 1
             if max_cycles is not None and cycles >= max_cycles:
