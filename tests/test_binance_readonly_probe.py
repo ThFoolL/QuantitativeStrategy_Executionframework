@@ -149,7 +149,58 @@ class BinanceReadonlyProbeCase(unittest.TestCase):
         self.assertEqual(info['category'], 'unknown')
         self.assertEqual(info['code'], -2015)
 
-    def test_run_probe_output_is_sanitized(self):
+
+    def test_run_probe_marks_close_position_order_visible_via_precise_lookup(self):
+        class ClosePositionOnlyClient(FakeProbeClient):
+            def get_order(self, symbol=None, order_id=None, client_order_id=None):
+                return type(
+                    'Order',
+                    (),
+                    {
+                        'order_id': str(order_id or '1000001'),
+                        'client_order_id': client_order_id or 'protect-cid',
+                        'status': 'NEW',
+                        'type': 'STOP_MARKET',
+                        'side': 'sell',
+                        'position_side': 'both',
+                        'qty': 0.0,
+                        'executed_qty': None,
+                        'price': 0.0,
+                        'avg_price': None,
+                        'reduce_only': True,
+                        'close_position': True,
+                    },
+                )()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            env_path = Path(tmp) / 'binance_api.env'
+            env_path.write_text(
+                '\n'.join(
+                    [
+                        'BINANCE_API_KEY=AKIA_TEST_KEY_123456',
+                        'BINANCE_API_SECRET=SECRET_TEST_VALUE_987654',
+                        'BINANCE_SYMBOL=BTCUSDT',
+                    ]
+                ),
+                encoding='utf-8',
+            )
+
+            import exec_framework.binance_readonly_probe as probe_module
+
+            original = probe_module.BinanceReadOnlyClient
+            probe_module.BinanceReadOnlyClient = ClosePositionOnlyClient
+            try:
+                result = run_probe(env_path, client_order_id='protect-cid')
+            finally:
+                probe_module.BinanceReadOnlyClient = original
+
+            self.assertFalse(result['summary']['has_open_orders'])
+            self.assertEqual(result['summary']['effective_open_order_count'], 1)
+            self.assertTrue(result['summary']['has_effective_open_orders'])
+            self.assertTrue(result['summary']['order_lookup_active'])
+            self.assertTrue(result['summary']['order_lookup_close_position'])
+            self.assertTrue(result['summary']['close_position_order_visible_only_via_precise_lookup'])
+            self.assertTrue(result['summary']['field_assumption_flags']['openOrders_may_omit_closePosition_protection'])
         with tempfile.TemporaryDirectory() as tmp:
             env_path = Path(tmp) / 'binance_api.env'
             env_path.write_text(

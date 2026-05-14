@@ -1011,7 +1011,10 @@ class RuntimeWorker:
             return False
         if confirmation_status == 'CONFIRMED' and execution_phase == 'confirmed':
             return True
-        return confirmation_status == 'POSITION_CONFIRMED' and execution_phase == 'position_confirmed_pending_trades'
+        return confirmation_status == 'POSITION_CONFIRMED' and execution_phase in {
+            'position_confirmed_pending_trades',
+            'entry_confirmed_pending_protective',
+        }
 
     @staticmethod
     def _build_async_protective_close_publishable_candidate(
@@ -1147,7 +1150,19 @@ class RuntimeWorker:
                 'state': state_payload,
                 'result': async_protective_close_candidate,
             }
+
+        cached_bar_ts = str(cached_result.get('bar_ts') or '')
+        current_bar_ts = str(result_payload.get('bar_ts') or state_payload.get('state_ts') or '')
+        cached_action = cached_result.get('action_type')
+        cached_is_open_like = cached_action in {'open', 'flip', 'add', 'trim'}
+        same_bar_cached_result = bool(cached_bar_ts and current_bar_ts and cached_bar_ts == current_bar_ts)
         if plan_action == 'protective_rebuild':
+            if same_bar_cached_result and cached_is_open_like:
+                return {
+                    **output,
+                    'state': state_payload,
+                    'result': cached_result,
+                }
             return output
 
         runtime_mode = state_payload.get('runtime_mode')
@@ -2585,6 +2600,16 @@ class RuntimeWorker:
             'reason': decision.reason,
             'recover_check': next_state.recover_check,
         }
+
+    def _fetch_exchange_open_orders(self, symbol: str) -> list[Any]:
+        readonly_client = getattr(self, 'readonly_client', None)
+        if readonly_client is None:
+            pre_run_reconcile_module = getattr(self.engine, 'pre_run_reconcile_module', None)
+            readonly_client = getattr(pre_run_reconcile_module, 'readonly_client', None)
+        getter = getattr(readonly_client, 'get_open_orders', None)
+        if not callable(getter):
+            return []
+        return list(getter(symbol) or [])
 
     def _maybe_cleanup_lingering_protective_orders(self, *, state: LiveStateSnapshot, run_id: str) -> dict[str, Any] | None:
         protective_orders = list(state.exchange_protective_orders or [])

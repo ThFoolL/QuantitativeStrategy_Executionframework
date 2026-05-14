@@ -237,6 +237,10 @@ def _resolve_order_probe_inputs(
     return None, None, None
 
 
+def _is_active_order_status(status: Any) -> bool:
+    return str(status or '').upper() in {'NEW', 'PARTIALLY_FILLED', 'PENDING_CANCEL', 'ACCEPTED', 'CALCULATED'}
+
+
 def run_probe(env_path: Path, *, symbol: str | None = None, order_id: str | None = None, client_order_id: str | None = None, trades_limit: int = 10) -> dict[str, Any]:
     config = load_binance_env(env_path)
     if symbol:
@@ -348,6 +352,24 @@ def run_probe(env_path: Path, *, symbol: str | None = None, order_id: str | None
     elif pos_risk_ok:
         inferred_mode = results['endpoints']['position_risk']['summary'].get('inferred_mode_from_positionRisk')
 
+    order_ok = results['endpoints']['order'].get('ok', False)
+    order_summary = results['endpoints']['order'].get('summary', {}) if order_ok else {}
+    order_status = order_summary.get('status')
+    order_close_position = bool(order_summary.get('close_position')) if order_ok else False
+    order_active = _is_active_order_status(order_status) if order_ok else False
+    open_order_count = results['endpoints']['open_orders'].get('summary', {}).get('open_order_count') if open_orders_ok else None
+    has_open_orders = results['endpoints']['open_orders'].get('summary', {}).get('has_open_orders') if open_orders_ok else None
+    effective_open_order_count = int(open_order_count or 0)
+    if order_active and effective_open_order_count == 0:
+        effective_open_order_count += 1
+    close_position_order_visible_only_via_precise_lookup = bool(
+        order_ok
+        and order_active
+        and order_close_position
+        and open_orders_ok
+        and int(open_order_count or 0) == 0
+    )
+
     results['summary'] = {
         'connectivity_ok': server_ok,
         'server_time_ms': results['endpoints']['server_time'].get('summary', {}).get('server_time_ms') if server_ok else None,
@@ -356,10 +378,15 @@ def run_probe(env_path: Path, *, symbol: str | None = None, order_id: str | None
         'position_risk_readable': pos_risk_ok,
         'open_orders_readable': open_orders_ok,
         'user_trades_readable': user_trades_ok,
-        'order_readable': results['endpoints']['order'].get('ok', False),
+        'order_readable': order_ok,
         'account_mode': inferred_mode,
         'has_positions': (results['endpoints']['position_risk'].get('summary', {}).get('nonzero_rows_count', 0) > 0) if pos_risk_ok else None,
-        'has_open_orders': results['endpoints']['open_orders'].get('summary', {}).get('has_open_orders') if open_orders_ok else None,
+        'has_open_orders': has_open_orders,
+        'effective_open_order_count': effective_open_order_count if open_orders_ok or order_ok else None,
+        'has_effective_open_orders': (effective_open_order_count > 0) if (open_orders_ok or order_ok) else None,
+        'order_lookup_active': order_active if order_ok else None,
+        'order_lookup_close_position': order_close_position if order_ok else None,
+        'close_position_order_visible_only_via_precise_lookup': close_position_order_visible_only_via_precise_lookup,
         'failure_categories': {
             name: item.get('error', {}).get('category')
             for name, item in results['endpoints'].items()
@@ -369,6 +396,7 @@ def run_probe(env_path: Path, *, symbol: str | None = None, order_id: str | None
             'positionRisk_multiple_nonzero_rows': results['endpoints']['position_risk'].get('summary', {}).get('multiple_nonzero_rows') if pos_risk_ok else None,
             'positionRisk_position_sides': results['endpoints']['position_risk'].get('summary', {}).get('position_sides') if pos_risk_ok else None,
             'userTrades_fee_assets': results['endpoints']['user_trades'].get('summary', {}).get('fee_assets') if user_trades_ok else None,
+            'openOrders_may_omit_closePosition_protection': close_position_order_visible_only_via_precise_lookup,
         },
     }
     return results

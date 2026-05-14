@@ -14,6 +14,152 @@ from unittest.mock import patch
 from exec_framework.async_operation import attach_execution_confirm_async_operation
 from exec_framework.models import ExecutionResult, LiveStateSnapshot
 from exec_framework.runtime_worker import RuntimeWorker, ReadonlyRecheckDecision
+from exec_framework.executor_real import BinanceRealExecutor
+
+
+class RuntimeWorkerPublishableSelectionCase(unittest.TestCase):
+    def test_select_publishable_output_uses_cached_open_for_same_bar_protective_rebuild(self) -> None:
+        cached_open = {
+            'status': 'FILLED',
+            'action_type': 'open',
+            'confirmation_status': 'POSITION_CONFIRMED',
+            'confirmed_order_status': 'FILLED',
+            'execution_phase': 'position_confirmed_pending_trades',
+            'post_position_side': 'long',
+            'post_position_qty': 0.802,
+            'post_entry_price': 2290.76,
+            'reconcile_status': 'OK',
+            'bar_ts': '2026-05-12T08:45:00+00:00',
+        }
+
+        class StubStore:
+            def __init__(self):
+                self._state = SimpleNamespace(last_publishable_result=cached_open)
+
+            def load_state(self):
+                return self._state
+
+            def save_state(self, new_state):
+                self._state = new_state
+
+        worker_like = SimpleNamespace(
+            state_store=StubStore(),
+            _is_publishable_execution_result=lambda result: RuntimeWorker._is_publishable_execution_result(result),
+            _is_publishable_open_candidate=lambda result: RuntimeWorker._is_publishable_open_candidate(result),
+            _build_async_protective_close_publishable_candidate=lambda **kwargs: RuntimeWorker._build_async_protective_close_publishable_candidate(**kwargs),
+        )
+
+        output = {
+            'state': {
+                'runtime_mode': 'ACTIVE',
+                'freeze_status': 'NONE',
+                'freeze_reason': None,
+                'exchange_position_side': 'long',
+                'exchange_position_qty': 0.802,
+                'last_publishable_result': cached_open,
+            },
+            'plan': {
+                'action_type': 'protective_rebuild',
+                'reason': 'protective_rebuild_after_entry_confirmation',
+            },
+            'result': {
+                'status': 'CONFIRMED',
+                'action_type': 'protective_rebuild',
+                'confirmation_status': 'CONFIRMED',
+                'confirmed_order_status': 'FILLED',
+                'execution_phase': 'confirmed',
+                'reconcile_status': 'OK',
+                'bar_ts': '2026-05-12T08:45:00+00:00',
+                'post_position_side': 'long',
+                'post_position_qty': 0.802,
+                'trade_summary': {
+                    'protective_orders_count': 2,
+                },
+            },
+        }
+
+        publishable = RuntimeWorker._select_publishable_output(worker_like, output)
+
+        self.assertEqual(publishable['result']['action_type'], 'open')
+        self.assertEqual(publishable['result']['bar_ts'], '2026-05-12T08:45:00+00:00')
+        self.assertEqual(publishable['result']['post_position_side'], 'long')
+
+
+class RuntimeWorkerProtectiveCleanupCase(unittest.TestCase):
+    def test_cleanup_lingering_protective_orders_falls_back_to_open_orders_probe(self) -> None:
+        state = LiveStateSnapshot(
+            state_ts='2026-05-12T13:41:00+00:00',
+            consistency_status='MISMATCH',
+            freeze_reason='local_exchange_position_presence_mismatch',
+            account_equity=1000.0,
+            available_margin=900.0,
+            exchange_position_side=None,
+            exchange_position_qty=0.0,
+            exchange_entry_price=None,
+            active_side=None,
+            strategy_entry_time='2026-05-12T11:45:00+00:00',
+            strategy_entry_price=2285.55,
+            stop_price=2276.31,
+            risk_fraction=0.1,
+            exchange_protective_orders=[
+                {
+                    'order_id': '1000001627480047',
+                    'client_order_id': '202605121145000000-protect-har',
+                    'kind': 'hard_stop',
+                },
+                {
+                    'order_id': '1000001627480062',
+                    'client_order_id': '202605121145000000-protect-tak',
+                    'kind': 'take_profit',
+                },
+            ],
+            active_strategy='trend',
+            runtime_mode='ACTIVE',
+            freeze_status='ACTIVE',
+            pending_execution_phase='frozen',
+            protective_order_status='PENDING_CONFIRM',
+        )
+
+        cancel_requests_seen = []
+        readonly_calls = []
+
+        class StubExecutorModule(BinanceRealExecutor):
+            def __init__(self):
+                pass
+
+            def _cancel_existing_protective_orders(self, cancel_requests):
+                cancel_requests_seen.extend(cancel_requests)
+                return {
+                    'ok': False,
+                    'reason': 'cancel_rejected',
+                    'receipts': [],
+                }
+
+        class StubReadonlyClient:
+            def get_open_orders(self, symbol):
+                readonly_calls.append(symbol)
+                return []
+
+        worker = RuntimeWorker(
+            config=SimpleNamespace(symbol='ETHUSDT'),
+            market_provider=SimpleNamespace(),
+            engine=SimpleNamespace(
+                executor_module=StubExecutorModule(),
+                pre_run_reconcile_module=SimpleNamespace(readonly_client=StubReadonlyClient()),
+            ),
+            state_store=SimpleNamespace(save_state=lambda state: None, load_last_result=lambda: None),
+            status_store=SimpleNamespace(path=Path('runtime/runtime_status.json'), write=lambda payload: None),
+            event_log=SimpleNamespace(path=Path('runtime/event_log.jsonl'), append=lambda *args, **kwargs: None),
+            scheduler=SimpleNamespace(config=SimpleNamespace(max_backoff_seconds=60)),
+        )
+
+        result = worker._maybe_cleanup_lingering_protective_orders(state=state, run_id='run-protective-cleanup')
+
+        self.assertIsNotNone(result)
+        self.assertTrue(result['allowed'])
+        self.assertEqual(result['result'], 'RECOVERED')
+        self.assertEqual(readonly_calls, ['ETHUSDT'])
+        self.assertEqual(len(cancel_requests_seen), 2)
 
 
 class RuntimeWorkerForceCloseProjectionCase(unittest.TestCase):
@@ -29,6 +175,23 @@ class RuntimeWorkerForceCloseProjectionCase(unittest.TestCase):
             'post_position_side': 'long',
             'post_position_qty': 0.021,
             'post_entry_price': 2281.83,
+            'avg_fill_price': None,
+        }
+
+        self.assertTrue(RuntimeWorker._is_publishable_open_candidate(result_payload))
+
+    def test_entry_confirmed_pending_protective_open_candidate_is_publishable(self) -> None:
+        result_payload = {
+            'status': 'POSITION_CONFIRMED',
+            'action_type': 'open',
+            'confirmation_status': 'POSITION_CONFIRMED',
+            'confirmed_order_status': 'FILLED',
+            'execution_phase': 'entry_confirmed_pending_protective',
+            'reconcile_status': 'OK',
+            'executed_qty': 0,
+            'post_position_side': 'long',
+            'post_position_qty': 0.824,
+            'post_entry_price': 2285.55,
             'avg_fill_price': None,
         }
 
