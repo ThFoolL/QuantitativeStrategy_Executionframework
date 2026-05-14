@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from .runtime_env import BinanceEnvConfig
-from .v6c_adapter import V6CLiveAdapter
+from .v6c_adapter_baseline import V6CBaselineLiveAdapter
 from .v6c_la_free_v1_adapter import V6CLAFreeV1LiveAdapter
 
 DEFAULT_STRATEGY_ADAPTER = 'baseline'
@@ -26,7 +26,7 @@ def normalize_strategy_adapter_name(name: str | None) -> str:
 def build_strategy_adapter(name: str | None = None):
     normalized = normalize_strategy_adapter_name(name)
     if normalized == 'baseline':
-        return V6CLiveAdapter()
+        return V6CBaselineLiveAdapter()
     if normalized == 'la_free_v1':
         return V6CLAFreeV1LiveAdapter()
     raise UnsupportedStrategyAdapterError(

@@ -18,21 +18,18 @@ class LiveFeatureConfig:
     state_lookback: int = 120
     range_lookback: int = 12
     rev_windows_15m: tuple[int, ...] = (24, 32, 48)
-    rev_dedup_tolerance_bars: int = 1
+    rev_band_buffer_frac: float = 0.2
 
 
 class LiveFeatureBuilder:
-    """从只读 kline 构造 live 最小特征集。
+    """从只读 kline 构造 live 策略特征集。
 
-    已尽量复用回测主脚本中的指标公式：
-    - ema_fast / ema_slow
-    - atr / adx / atr_rank
-    - structure_tag
+    trend features 继续使用 live adapter 当前所需的最小实时特征。
 
-    rev_candidate 当前升级为 `shared_formal_lite_v1`：
-    - 复用 formal 主线中的多窗口入口思想（24/32/48）
-    - 保持 live 内部纯本地计算，不依赖外部回测脚本运行时
-    - 明确仍不是 full formal parity；只是比 heuristic_v1 更接近正式口径
+    rev_candidate 必须复刻 baseline 策略层 `strategies/s1_formal_v6c/reversal_runtime.py`
+    的候选生成、close30 过滤与同 timestamp 去重语义。这里不允许再使用
+    `shared_formal_lite` 近似候选，否则会让 execution framework 执行出策略层
+    不会产生的 rev_entry。
     """
 
     def __init__(self, config: LiveFeatureConfig | None = None):
@@ -40,7 +37,7 @@ class LiveFeatureBuilder:
 
     def build(self, *, symbol: str, trend_bars: list[Any], signal_bars: list[Any]) -> dict[str, Any]:
         trend_df = self._bars_to_frame(trend_bars)
-        signal_df = self._bars_to_frame(signal_bars)
+        signal_df = self._bars_to_open_frame(signal_bars)
         trend_features = self.build_trend_features(symbol=symbol, trend_bars=trend_bars)
         rev_candidate = self.build_rev_candidate(symbol=symbol, signal_bars=signal_bars, trend_bars=trend_bars)
         return {
@@ -55,6 +52,9 @@ class LiveFeatureBuilder:
 
     def build_trend_features(self, *, symbol: str, trend_bars: list[Any]) -> dict[str, Any]:
         del symbol
+        # Baseline trend runtime consumes right-labeled / closed-right 1h bars.
+        # For already-aggregated 1h klines, feature indexing must therefore align to
+        # bar close semantics rather than bar open semantics.
         trend_df = self._bars_to_frame(trend_bars)
         if trend_df.empty:
             return {
@@ -80,160 +80,228 @@ class LiveFeatureBuilder:
 
     def build_rev_candidate(self, *, symbol: str, signal_bars: list[Any], trend_bars: list[Any]) -> dict[str, Any] | None:
         del symbol
-        signal_df = self._bars_to_frame(signal_bars)
-        trend_df = self._compute_trend_features(self._bars_to_frame(trend_bars))
-        if len(signal_df) < 12 or trend_df.empty:
+        # baseline reversal strategy is defined on 5m bars indexed by bar-open timestamp and
+        # internally resamples those 5m bars to 15m/1h. Reusing 15m bars or close_time indices here
+        # silently changes touch/depth/filter semantics, so rev parity must build from 5m open time.
+        df_5m = self._bars_to_open_frame(signal_bars)
+        if len(df_5m) < 12:
             return None
 
-        current_trend = trend_df.iloc[-1]
-        structure_tag = self._classify_structure(trend_df)
-        atr_rank = self._clean_float(current_trend.get('atr_rank'))
-        ema_fast = self._clean_float(current_trend.get('ema_fast'))
-        adx = self._clean_float(current_trend.get('adx'))
-        if atr_rank is None or ema_fast is None or adx is None:
+        signals: list[pd.DataFrame] = []
+        for window in self.config.rev_windows_15m:
+            cand = self._generate_baseline_rev_candidates(df_5m, value_window_15m=int(window))
+            if cand.empty:
+                continue
+            sig = self._apply_baseline_close30_filter(cand)
+            if not sig.empty:
+                signals.append(sig)
+        if not signals:
             return None
 
-        candidates = self._generate_formal_lite_candidates(signal_df)
-        if not candidates:
+        merged = pd.concat(signals, ignore_index=True)
+        deduped = self._baseline_dedup_by_ts(merged)
+        if deduped.empty:
             return None
 
-        candidates = self._apply_formal_lite_filter(candidates, trend_df, structure_tag)
-        if not candidates:
+        current_ts = df_5m.index[-1]
+        current_rows = deduped[pd.to_datetime(deduped['ts'], utc=True) == current_ts]
+        if current_rows.empty:
             return None
 
-        chosen = self._dedup_candidates(candidates)
-        current_close = float(signal_df.iloc[-1]['close'])
-        risk = abs(float(chosen['entry']) - float(chosen['stop']))
+        chosen = current_rows.iloc[0]
+        risk = float(chosen['risk'])
         if risk <= 0:
             return None
-
-        score = self._score_rev_candidate(
-            current_close=current_close,
-            risk=risk,
-            atr_rank=atr_rank,
-            adx=adx,
-            window=int(chosen['value_window_15m']),
-        )
         return {
             'ts': pd.Timestamp(chosen['ts']).isoformat(),
             'side': str(chosen['side']),
             'entry': float(chosen['entry']),
             'stop': float(chosen['stop']),
             'tp1': float(chosen['tp1']),
+            'risk': risk,
             'value_window_15m': int(chosen['value_window_15m']),
-            'score': score,
-            'approximation': 'shared_formal_lite_v1',
+            'score': float(chosen['score']),
+            'depth_in_band_frac': float(chosen['depth_in_band_frac']),
+            'retrace_side': float(chosen['retrace_side']),
+            'close_away_from_edge': float(chosen['close_away_from_edge']),
+            'reversion_space': float(chosen['reversion_space']),
+            'body_frac': float(chosen['body_frac']),
+            'fav_r_30m': float(chosen['fav_r_30m']),
+            'adv_r_30m': float(chosen['adv_r_30m']),
+            'fav_r_60m': float(chosen['fav_r_60m']),
+            'adv_r_60m': float(chosen['adv_r_60m']),
+            'close_r_30m': float(chosen['close_r_30m']),
+            'core_mid': float(chosen['core_mid']),
+            'total_width': float(chosen['total_width']),
             'source': 'live_feature_builder',
-            'structure_tag_basis': structure_tag,
-            'formal_alignment': 'shared_formal_lite',
+            'strategy_source': 'baseline_reversal_runtime',
+            'formal_alignment': 'baseline_reversal_runtime_exact',
+            'approximation': 'none',
             'notes': [
-                'multi_window_rev_candidate',
-                'not_full_backtest_parity',
+                'baseline_generate_candidates',
+                'baseline_apply_close30_filter',
+                'baseline_dedup_by_ts',
+                'no_shared_formal_lite',
             ],
         }
 
-    def _generate_formal_lite_candidates(self, signal_df: pd.DataFrame) -> list[dict[str, Any]]:
-        candidates: list[dict[str, Any]] = []
-        current = signal_df.iloc[-1]
-        current_close = float(current['close'])
-        current_ts = signal_df.index[-1]
+    def _generate_baseline_rev_candidates(self, df_5m: pd.DataFrame, *, value_window_15m: int) -> pd.DataFrame:
+        cfg = self.config
+        df_15m = df_5m.resample('15min', label='right', closed='right').agg(
+            {'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}
+        ).dropna()
+        regime = self._build_baseline_rev_regime(df_5m)
 
-        for window in self.config.rev_windows_15m:
-            if len(signal_df) < window + 2:
+        rows: list[dict[str, Any]] = []
+        for i in range(value_window_15m, len(df_15m)):
+            ts = df_15m.index[i]
+            row = df_15m.iloc[i]
+            oneh = regime[regime.index <= ts]
+            if oneh.empty or not bool(oneh.iloc[-1]['range_ok']):
                 continue
-            recent = signal_df.tail(window)
-            prior = recent.iloc[:-1]
-            prev = recent.iloc[-2]
-
-            prev_high = float(prev['high'])
-            prev_low = float(prev['low'])
-            prior_low = float(prior['low'].min())
-            prior_high = float(prior['high'].max())
-            recent_range = max(prior_high - prior_low, 1e-9)
-
-            long_break = prev_low <= prior_low * 1.001 and current_close > prev_high
-            short_break = prev_high >= prior_high * 0.999 and current_close < prev_low
-
-            if long_break:
-                stop = min(prior_low, prev_low)
-                if current_close > stop:
-                    risk = current_close - stop
-                    candidates.append(
-                        {
-                            'ts': current_ts,
-                            'side': 'long',
-                            'entry': current_close,
-                            'stop': stop,
-                            'tp1': current_close + risk,
-                            'value_window_15m': window,
-                            'range_ratio': min(recent_range / max(current_close, 1e-9), 1.0),
-                        }
-                    )
-
-            if short_break:
-                stop = max(prior_high, prev_high)
-                if stop > current_close:
-                    risk = stop - current_close
-                    candidates.append(
-                        {
-                            'ts': current_ts,
-                            'side': 'short',
-                            'entry': current_close,
-                            'stop': stop,
-                            'tp1': current_close - risk,
-                            'value_window_15m': window,
-                            'range_ratio': min(recent_range / max(current_close, 1e-9), 1.0),
-                        }
-                    )
-
-        return candidates
-
-    def _apply_formal_lite_filter(
-        self,
-        candidates: list[dict[str, Any]],
-        trend_df: pd.DataFrame,
-        structure_tag: str,
-    ) -> list[dict[str, Any]]:
-        current_trend = trend_df.iloc[-1]
-        ema_fast = float(current_trend['ema_fast'])
-        adx = self._clean_float(current_trend.get('adx')) or 0.0
-        atr_rank = self._clean_float(current_trend.get('atr_rank')) or 0.0
-
-        filtered: list[dict[str, Any]] = []
-        for item in candidates:
-            entry = float(item['entry'])
-            side = str(item['side'])
-            near_ema = abs(entry - ema_fast) / max(entry, 1e-9) <= 0.02
-            if not near_ema:
+            hist = df_15m.iloc[i - value_window_15m : i]
+            vals = hist['close'].to_numpy()
+            low, mid, high, core_width = self._baseline_compute_zone(vals)
+            if not np.isfinite(core_width) or core_width <= 0:
                 continue
-            if structure_tag not in {'CHOP', 'COMPRESSION', 'TREND_CONT'}:
+            total_low = low - cfg.rev_band_buffer_frac * core_width
+            total_high = high + cfg.rev_band_buffer_frac * core_width
+            total_width = total_high - total_low
+            if total_width <= 0:
                 continue
-            if adx > 35 and atr_rank > 0.75:
-                continue
-            if side == 'long' and entry < ema_fast * 0.985:
-                continue
-            if side == 'short' and entry > ema_fast * 1.015:
-                continue
-            filtered.append(item)
-        return filtered
 
-    def _dedup_candidates(self, candidates: list[dict[str, Any]]) -> dict[str, Any]:
-        ranked = sorted(
-            candidates,
-            key=lambda item: (
-                int(item['value_window_15m']) != 24,
-                -float(item.get('range_ratio', 0.0)),
-                int(item['value_window_15m']),
-            ),
+            long_touch = row['low'] <= low
+            short_touch = row['high'] >= high
+            if not (long_touch or short_touch):
+                continue
+
+            fut = df_5m[df_5m.index > ts].iloc[:96]
+            fut_30 = fut.iloc[:6]
+            fut_60 = fut.iloc[:12]
+            if len(fut_60) < 6:
+                continue
+
+            candle_range = max(float(row['high'] - row['low']), 1e-9)
+            body_frac = abs(float(row['close'] - row['open'])) / total_width
+
+            def append_side(side: str, entry: float, stop: float, depth: float, retrace: float, away: float, rev_space: float) -> None:
+                risk = entry - stop if side == 'long' else stop - entry
+                if risk <= 0:
+                    return
+                if side == 'long':
+                    fav30 = (float(fut_30['high'].max()) - entry) / risk
+                    adv30 = (entry - float(fut_30['low'].min())) / risk
+                    fav60 = (float(fut_60['high'].max()) - entry) / risk
+                    adv60 = (entry - float(fut_60['low'].min())) / risk
+                    close30 = (float(fut_30.iloc[-1]['close']) - entry) / risk
+                else:
+                    fav30 = (entry - float(fut_30['low'].min())) / risk
+                    adv30 = (float(fut_30['high'].max()) - entry) / risk
+                    fav60 = (entry - float(fut_60['low'].min())) / risk
+                    adv60 = (float(fut_60['high'].max()) - entry) / risk
+                    close30 = (entry - float(fut_30.iloc[-1]['close'])) / risk
+                rows.append(
+                    {
+                        'ts': ts,
+                        'side': side,
+                        'entry': entry,
+                        'stop': stop,
+                        'risk': risk,
+                        'tp1': entry + risk if side == 'long' else entry - risk,
+                        'depth_in_band_frac': depth,
+                        'retrace_side': retrace,
+                        'close_away_from_edge': away,
+                        'reversion_space': rev_space,
+                        'body_frac': body_frac,
+                        'fav_r_30m': fav30,
+                        'adv_r_30m': adv30,
+                        'fav_r_60m': fav60,
+                        'adv_r_60m': adv60,
+                        'close_r_30m': close30,
+                        'core_mid': mid,
+                        'total_width': total_width,
+                        'value_window_15m': value_window_15m,
+                    }
+                )
+
+            if long_touch:
+                depth = min(max((low - float(row['low'])) / max(low - total_low, 1e-9), 0.0), 3.0)
+                retr = (float(row['close'] - row['low'])) / candle_range
+                away = (float(row['close']) - total_low) / total_width
+                rev_space = (mid - float(row['close'])) / total_width
+                stop = float(total_low - 0.15 * total_width)
+                append_side('long', float(row['close']), stop, depth, retr, away, rev_space)
+
+            if short_touch:
+                depth = min(max((float(row['high']) - high) / max(total_high - high, 1e-9), 0.0), 3.0)
+                retr = (float(row['high'] - row['close'])) / candle_range
+                away = (total_high - float(row['close'])) / total_width
+                rev_space = (float(row['close']) - mid) / total_width
+                stop = float(total_high + 0.15 * total_width)
+                append_side('short', float(row['close']), stop, depth, retr, away, rev_space)
+
+        out = pd.DataFrame(rows)
+        if out.empty:
+            return out
+        return out.sort_values(['ts', 'side']).reset_index(drop=True)
+
+    def _build_baseline_rev_regime(self, df_5m: pd.DataFrame) -> pd.DataFrame:
+        df_1h = df_5m.resample('1h', label='right', closed='right').agg(
+            {'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}
+        ).dropna()
+        ema_fast = df_1h['close'].ewm(span=20, adjust=False).mean()
+        ema_slow = df_1h['close'].ewm(span=50, adjust=False).mean()
+        prev_close = df_1h['close'].shift(1)
+        tr = pd.concat(
+            [
+                df_1h['high'] - df_1h['low'],
+                (df_1h['high'] - prev_close).abs(),
+                (df_1h['low'] - prev_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+        atr = tr.rolling(14).mean()
+        atr_pct = atr / df_1h['close']
+        atr_rank = atr_pct.rolling(120).rank(pct=True)
+        ema_slow_gap_pct = (df_1h['close'] - ema_slow).abs() / df_1h['close'] * 100.0
+        ema_stack_pct = (ema_fast - ema_slow).abs() / df_1h['close'] * 100.0
+        return pd.DataFrame(
+            {
+                'range_ok': (atr_rank <= 0.5) & (ema_slow_gap_pct <= 1.5) & (ema_stack_pct <= 0.45),
+            },
+            index=df_1h.index,
         )
-        return ranked[0]
 
     @staticmethod
-    def _score_rev_candidate(*, current_close: float, risk: float, atr_rank: float, adx: float, window: int) -> float:
-        raw = 0.4 * min(risk / max(current_close, 1e-9) * 100, 1.0) + 0.4 * max(0.0, 1.0 - atr_rank) + 0.2 * max(0.0, 1.0 - min(adx / 40.0, 1.0))
-        if window == 24:
-            raw += 0.05
-        return round(min(max(raw, 0.0), 1.0), 4)
+    def _baseline_compute_zone(hist_close: np.ndarray, q_low: float = 0.2, q_mid: float = 0.5, q_high: float = 0.8) -> tuple[float, float, float, float]:
+        low, mid, high = np.quantile(hist_close, [q_low, q_mid, q_high])
+        width = high - low
+        return float(low), float(mid), float(high), float(width)
+
+    @staticmethod
+    def _apply_baseline_close30_filter(cand: pd.DataFrame) -> pd.DataFrame:
+        mask = (
+            (cand['depth_in_band_frac'] >= 0.25)
+            & (cand['retrace_side'] >= 0.85)
+            & (cand['close_away_from_edge'] >= 0.20)
+            & (cand['body_frac'] <= 0.50)
+            & (cand['adv_r_30m'] <= 0.35)
+            & (cand['adv_r_60m'] <= 0.50)
+            & (cand['fav_r_30m'] >= 0.35)
+            & (cand['close_r_30m'] >= 0.00)
+        )
+        return cand[mask].copy()
+
+    @staticmethod
+    def _baseline_dedup_by_ts(sig: pd.DataFrame) -> pd.DataFrame:
+        if sig.empty:
+            return sig
+        s = sig.copy()
+        s['score'] = s['retrace_side'] * 2 + s['fav_r_30m'] - s['adv_r_30m']
+        kept = []
+        for _, g in s.groupby('ts', sort=True):
+            kept.append(g.sort_values('score', ascending=False).iloc[0])
+        return pd.DataFrame(kept).sort_values('ts').reset_index(drop=True)
 
     def _compute_trend_features(self, trend_df: pd.DataFrame) -> pd.DataFrame:
         df = trend_df.copy()
@@ -277,6 +345,27 @@ class LiveFeatureBuilder:
     def _trend_row_ready(row: pd.Series) -> bool:
         required = ('ema_fast', 'ema_slow', 'adx', 'atr_rank')
         return all(pd.notna(row.get(key)) for key in required)
+
+    @staticmethod
+    def _bars_to_open_frame(bars: list[Any]) -> pd.DataFrame:
+        rows: list[dict[str, Any]] = []
+        for bar in bars:
+            if not getattr(bar, 'is_closed', False):
+                continue
+            rows.append(
+                {
+                    'ts': pd.Timestamp(int(getattr(bar, 'open_time_ms')) / 1000.0, unit='s', tz='UTC'),
+                    'open': float(getattr(bar, 'open_price')),
+                    'high': float(getattr(bar, 'high_price')),
+                    'low': float(getattr(bar, 'low_price')),
+                    'close': float(getattr(bar, 'close_price')),
+                    'volume': float(getattr(bar, 'volume')),
+                }
+            )
+        if not rows:
+            return pd.DataFrame(columns=['open', 'high', 'low', 'close', 'volume'])
+        frame = pd.DataFrame(rows).drop_duplicates(subset=['ts'], keep='last').set_index('ts').sort_index()
+        return frame[['open', 'high', 'low', 'close', 'volume']]
 
     @staticmethod
     def _bars_to_frame(bars: list[Any]) -> pd.DataFrame:

@@ -33,6 +33,7 @@ class MarketFrameBundle:
     trend_1h_ts: str | None
     signal_15m_history: list[dict[str, Any]]
     rev_candidate: dict[str, Any] | None = None
+    event_tag: str = 'NO_EVENT'
     source_status: str = 'OK'
     metadata: dict[str, Any] | None = None
 
@@ -106,8 +107,9 @@ class BinanceReadOnlyMarketDataProvider:
     - 统一执行层时间语义：`strategy_ts/bar_ts/execution_attributed_bar` 全部对齐正式 5m bar
 
     重要限制：
-    - 当前 feature builder 只复用了回测里的最小指标公式，并未完整复刻全部 live/backtest 特征工程。
-    - `rev_candidate` 目前是启发式近似，仅可作为 live 最小占位输入，不应宣称正式对齐回测信号。
+    - trend feature builder 只复用了 live adapter 当前所需的最小指标公式。
+    - `rev_candidate` 必须使用 baseline 策略层 reversal runtime 的 5m -> 15m/1h
+      候选生成、close30 过滤、同 timestamp 去重语义，禁止再使用启发式近似候选。
     - 当前缓存仍是进程内缓存；重启后会重新 warmup，不做持久化。
     """
 
@@ -143,10 +145,11 @@ class BinanceReadOnlyMarketDataProvider:
         if fast_bar is None or signal_bar is None or trend_bar is None or len(signal_history_bars) < 4:
             raise ValueError('insufficient closed klines for readonly market snapshot')
 
+        fast_closed_bars = self._closed_at_or_before(fast_klines, strategy_bar)
         signal_closed_bars = self._closed_at_or_before(signal_klines, strategy_bar)
         trend_closed_bars = self._closed_at_or_before(trend_klines, strategy_bar)
         trend_features = self._build_trend_features(symbol=symbol, trend_bars=trend_closed_bars)
-        rev_candidate = self._build_rev_candidate(symbol=symbol, signal_bars=signal_closed_bars, trend_bars=trend_closed_bars)
+        rev_candidate = self._build_rev_candidate(symbol=symbol, fast_bars=fast_closed_bars, trend_bars=trend_closed_bars)
         # `rev_candidate` 为空通常表示当前没有反转机会，不应被记成数据/特征缺失。
         feature_flags = trend_features['missing_fields'][:]
         source_status = 'OK' if not feature_flags else 'PARTIAL_FEATURES'
@@ -157,11 +160,12 @@ class BinanceReadOnlyMarketDataProvider:
             current_price=float(fast_bar.close_price),
             fast_5m=self._kline_to_ohlcv_dict(fast_bar),
             signal_15m=self._kline_to_ohlcv_dict(signal_bar),
-            signal_15m_ts=self._bar_open_iso(signal_bar.open_time_ms),
+            signal_15m_ts=self._bar_close_iso(signal_bar.close_time_ms),
             trend_1h=trend_features['values'],
-            trend_1h_ts=self._bar_open_iso(trend_bar.open_time_ms),
+            trend_1h_ts=self._bar_close_iso(trend_bar.close_time_ms),
             signal_15m_history=[self._kline_to_signal_history_dict(item) for item in signal_history_bars],
             rev_candidate=rev_candidate,
+            event_tag='NO_EVENT',
             source_status=source_status,
             metadata={
                 'provider': 'binance_readonly',
@@ -176,6 +180,7 @@ class BinanceReadOnlyMarketDataProvider:
                 'notes': [
                     'strategy_ts/bar_ts/execution_attributed_bar 统一对齐正式 5m bar',
                     'signal_15m/trend_1h 一律按 <= strategy_ts 的最近已闭合数据对齐，禁止 future leak',
+                    'rev_candidate 使用 5m 历史复刻 baseline reversal_runtime，不再使用 shared_formal_lite 近似',
                     '首次 warmup 后按各周期小窗口增量刷新，避免每轮全量重拉',
                 ],
             },
@@ -258,12 +263,12 @@ class BinanceReadOnlyMarketDataProvider:
             'missing_fields': missing_fields,
         }
 
-    def _build_rev_candidate(self, *, symbol: str, signal_bars: list[Any], trend_bars: list[Any]) -> dict[str, Any] | None:
+    def _build_rev_candidate(self, *, symbol: str, fast_bars: list[Any], trend_bars: list[Any]) -> dict[str, Any] | None:
         if self.feature_builder is None:
             return None
         return self.feature_builder.build_rev_candidate(
             symbol=symbol,
-            signal_bars=signal_bars,
+            signal_bars=fast_bars,
             trend_bars=trend_bars,
         )
 
@@ -306,6 +311,10 @@ class BinanceReadOnlyMarketDataProvider:
     @staticmethod
     def _bar_open_iso(open_time_ms: int) -> str:
         return datetime.fromtimestamp(open_time_ms / 1000.0, tz=timezone.utc).isoformat()
+
+    @staticmethod
+    def _bar_close_iso(close_time_ms: int) -> str:
+        return datetime.fromtimestamp(close_time_ms / 1000.0, tz=timezone.utc).isoformat()
 
 
 def align_timeframe(value: datetime, *, minutes: int) -> datetime:
@@ -368,4 +377,5 @@ def build_market_snapshot(
         trend_1h_ts=bundle.trend_1h_ts,
         signal_15m_history=list(bundle.signal_15m_history),
         rev_candidate=bundle.rev_candidate,
+        event_tag=bundle.event_tag,
     )

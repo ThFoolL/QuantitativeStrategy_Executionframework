@@ -73,10 +73,13 @@ class V6CLiveAdapter:
 
     def _trade_grade(self, market: MarketSnapshot) -> str:
         session_tag = self._session_tag(market.bar_ts)
+        event_tag = str(getattr(market, 'event_tag', 'NO_EVENT') or 'NO_EVENT')
         structure_tag = str(market.trend_1h.get('structure_tag', 'CHOP'))
-        if session_tag == 'LOW_ACTIVITY' or structure_tag == 'CHOP':
+        # Must match strategies/s1_formal_v6c/runtime.py: EVENT_LIVE and CHOP are grade C.
+        # LOW_ACTIVITY is not itself a grade-C condition in baseline; entry is gated separately.
+        if event_tag == 'EVENT_LIVE' or structure_tag == 'CHOP':
             return 'C'
-        if session_tag == 'US_CORE' and structure_tag == 'EXPANSION':
+        if structure_tag == 'EXPANSION':
             return 'S'
         if structure_tag == 'TREND_CONT':
             return 'A'
@@ -333,8 +336,14 @@ class V6CLiveAdapter:
 
         signal_ts = market.signal_15m_ts or market.bar_ts
         session_tag = self._session_tag(market.bar_ts)
+        event_tag = str(getattr(market, 'event_tag', 'NO_EVENT') or 'NO_EVENT')
+        grade = self._trade_grade(market)
+        if grade == 'C':
+            return FinalActionPlan(market.decision_ts, market.bar_ts, 'hold', None, None, 'grade_c_block', requires_execution=False)
         if session_tag == 'LOW_ACTIVITY':
             return FinalActionPlan(market.decision_ts, market.bar_ts, 'hold', None, None, 'low_activity_block', requires_execution=False)
+        if event_tag == 'EVENT_LIVE':
+            return FinalActionPlan(market.decision_ts, market.bar_ts, 'hold', None, None, 'event_live_block', requires_execution=False)
         if state.last_trend_signal_ts is not None and signal_ts == state.last_trend_signal_ts:
             return FinalActionPlan(market.decision_ts, market.bar_ts, 'hold', None, None, 'duplicate_trend_signal_ts', requires_execution=False)
 
@@ -367,7 +376,11 @@ class V6CLiveAdapter:
             if breakout_follow or pullback_follow:
                 risk_fraction = state.risk_fraction_extreme if (long_expansion_bias and session_tag == 'US_CORE' and atr_rank >= 0.7 and adx >= 26 and breakout_follow) else (state.risk_fraction_high if (long_trend_cont_bias and pullback_follow) else state.risk_fraction_medium)
                 stop_anchor = min(float(swing_low), float(ema_fast * (1 - 0.007)))
-                return FinalActionPlan(market.decision_ts, market.bar_ts, 'open', 'trend', 'long', 'trend_long_entry', qty_mode='risk_based', price_hint=close, stop_price=stop_anchor, risk_fraction=risk_fraction, conflict_context={'signal_ts': signal_ts}, requires_execution=True)
+                stop_price = float(stop_anchor * (1 - 0.0002))
+                if close - stop_price <= 0:
+                    return FinalActionPlan(market.decision_ts, market.bar_ts, 'hold', None, None, 'invalid_trend_long_risk', requires_execution=False)
+                entry_price = float(close * (1 + 0.0002))
+                return FinalActionPlan(market.decision_ts, market.bar_ts, 'open', 'trend', 'long', 'trend_long_entry', qty_mode='risk_based', price_hint=entry_price, stop_price=stop_price, risk_fraction=risk_fraction, conflict_context={'signal_ts': signal_ts}, requires_execution=True)
 
         if short_expansion_bias or short_trend_cont_bias:
             recent_push = hist[-4]['close'] > hist[-3]['close'] > hist[-2]['close']
@@ -386,7 +399,11 @@ class V6CLiveAdapter:
                 risk_fraction = state.risk_fraction_extreme if (short_expansion_bias and atr_rank >= 0.65 and adx >= 24 and breakout_follow) else (state.risk_fraction_high if (short_trend_cont_bias and pullback_follow) else state.risk_fraction_medium)
                 risk_fraction *= 0.8
                 stop_anchor = max(float(swing_high), float(ema_fast * (1 + 0.007)))
-                return FinalActionPlan(market.decision_ts, market.bar_ts, 'open', 'trend', 'short', 'trend_short_entry', qty_mode='risk_based', price_hint=close * (1 - 0.0002), stop_price=stop_anchor * (1 + 0.0002), risk_fraction=risk_fraction, conflict_context={'signal_ts': signal_ts}, requires_execution=True)
+                stop_price = float(stop_anchor * (1 + 0.0002))
+                if stop_price - close <= 0:
+                    return FinalActionPlan(market.decision_ts, market.bar_ts, 'hold', None, None, 'invalid_trend_short_risk', requires_execution=False)
+                entry_price = float(close * (1 - 0.0002))
+                return FinalActionPlan(market.decision_ts, market.bar_ts, 'open', 'trend', 'short', 'trend_short_entry', qty_mode='risk_based', price_hint=entry_price, stop_price=stop_price, risk_fraction=risk_fraction, conflict_context={'signal_ts': signal_ts}, requires_execution=True)
 
         return FinalActionPlan(market.decision_ts, market.bar_ts, 'hold', None, None, 'no_supported_trend_signal', requires_execution=False)
 
@@ -400,7 +417,8 @@ class V6CLiveAdapter:
         risk_per_unit = abs(entry - stop)
         if risk_per_unit <= 0:
             return FinalActionPlan(market.decision_ts, market.bar_ts, 'hold', None, None, 'invalid_rev_candidate', requires_execution=False)
-        risk_fraction = 0.10 if int(cand.get('value_window_15m', 24)) == 24 else 0.05
+        value_window = int(cand.get('value_window_15m', 24))
+        risk_fraction = 0.10 if value_window == 48 else (0.08 if value_window == 32 else 0.06)
         tp_price = entry + risk_per_unit if side == 'long' else entry - risk_per_unit
         return FinalActionPlan(
             market.decision_ts,
@@ -413,7 +431,7 @@ class V6CLiveAdapter:
             price_hint=entry,
             stop_price=stop,
             risk_fraction=risk_fraction,
-            conflict_context={'tp_price': tp_price, 'rev_window': int(cand.get('value_window_15m', 24))},
+            conflict_context={'tp_price': tp_price, 'rev_window': value_window},
             requires_execution=True,
         )
 

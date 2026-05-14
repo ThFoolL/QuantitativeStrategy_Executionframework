@@ -21,6 +21,10 @@ class MarketSnapshot:
     trend_1h_ts: Optional[str] = None
     signal_15m_history: List[Dict[str, Any]] = field(default_factory=list)
     rev_candidate: Optional[Dict[str, Any]] = None
+    # Baseline strategy's event calendar is empty in the current live deployment, so the default
+    # is NO_EVENT. If event data is wired later, EVENT_LIVE must gate trend entries exactly like
+    # strategies/s1_formal_v6c/runtime.py.
+    event_tag: str = 'NO_EVENT'
 
 
 @dataclass
@@ -65,6 +69,7 @@ class LiveStateSnapshot:
     execution_high_water_r: float = 0.0
     last_signal_bar: Optional[str] = None
     last_trend_signal_ts: Optional[str] = None
+    last_rev_signal_ts: Optional[str] = None
     last_processed_strategy_ts: Optional[str] = None
     last_conflict_resolution: Optional[str] = None
     can_open_new_position: bool = True
