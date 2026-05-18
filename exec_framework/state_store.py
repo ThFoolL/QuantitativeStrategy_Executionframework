@@ -161,6 +161,10 @@ def apply_pre_run_reconcile(
     freeze_reason: str | None = None,
     can_open_new_position: bool | None = None,
     can_modify_position: bool | None = None,
+    exchange_protective_orders: list[dict[str, Any]] | None = None,
+    protective_order_status: str | None = None,
+    protective_phase_status: str | None = None,
+    protective_order_last_sync_action: str | None = None,
 ) -> LiveStateSnapshot:
     resolved_freeze_reason = freeze_reason
     if consistency_status != 'OK' and resolved_freeze_reason is None and last_result is not None:
@@ -202,6 +206,11 @@ def apply_pre_run_reconcile(
         runtime_mode=runtime_mode,
         freeze_status=freeze_status,
         last_freeze_reason=last_freeze_reason,
+        exchange_protective_orders=list(exchange_protective_orders or state.exchange_protective_orders or []),
+        protective_order_status=protective_order_status or state.protective_order_status,
+        protective_phase_status=protective_phase_status or state.protective_phase_status,
+        protective_order_last_sync_ts=state_ts,
+        protective_order_last_sync_action=protective_order_last_sync_action or state.protective_order_last_sync_action,
     )
 
 

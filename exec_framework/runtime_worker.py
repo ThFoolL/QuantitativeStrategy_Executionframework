@@ -13,7 +13,7 @@ from .binance_readonly import BinanceReadOnlyClient
 from .binance_reconcile import ExchangeSnapshot, ReconcileInput, reconcile_pre_run
 from .engine import LiveEngine
 from .executor_real import BinanceCancelOrderRequest, BinanceOrderRequest, BinanceRealExecutor
-from .protective_orders import split_open_orders
+from .protective_orders import split_open_orders, snapshot_protective_orders
 from .binance_posttrade import SimulatedExecutionReceipt, build_confirm_context
 from .feature_builder import LiveFeatureBuilder
 from .market_data import BinanceReadOnlyMarketDataProvider, MarketDataProvider, StubMarketDataProvider, build_market_snapshot
@@ -27,6 +27,7 @@ from .strategy_protection_intent import (
 )
 from .async_operation import attach_execution_confirm_async_operation, attach_protection_followup_async_operation
 from .discord_sender_bridge import MessageToolDiscordSender, build_discord_transport
+from .discord_publisher import DiscordMessagePayload
 from .runtime_guard import (
     RECOVER_RESULT_ALLOWED,
     RECOVER_RESULT_BLOCKED,
@@ -92,6 +93,7 @@ class BinancePreRunReconcileModule:
         ]
         open_orders = self.readonly_client.get_open_orders(market.symbol, client_order_ids=protection_ids)
         open_orders = self._merge_bootstrap_protective_orders(symbol=market.symbol, state=state, open_orders=open_orders)
+        protective_snapshot = snapshot_protective_orders(open_orders)
         self.last_account_snapshot_summary = self._summarize_account_snapshot(account, retry_trace=retry_trace)
         decision = reconcile_pre_run(
             ReconcileInput(
@@ -120,6 +122,10 @@ class BinancePreRunReconcileModule:
             freeze_reason=decision.freeze_reason,
             can_open_new_position=decision.can_open_new_position,
             can_modify_position=decision.can_modify_position,
+            exchange_protective_orders=protective_snapshot.orders,
+            protective_order_status='ACTIVE' if protective_snapshot.orders else 'NONE',
+            protective_phase_status='ACTIVE' if protective_snapshot.orders else 'NONE',
+            protective_order_last_sync_action='pre_run_reconcile',
         )
 
     def _load_account_snapshot_with_retries(self) -> tuple[Any, list[dict[str, Any]]]:
@@ -1174,8 +1180,9 @@ class RuntimeWorker:
             and is_flat_on_exchange
             and result_payload.get('reconcile_status') == 'OK'
         )
-        # Keep cached context in state for inspection, but do not let frozen/flat/terminal rounds re-anchor preview payloads to an old fill.
-        if current_action in {'hold', None} or runtime_mode == 'FROZEN' or is_flat_on_exchange or is_terminal_current_result:
+        # Keep cached context in state for inspection, but do not let non-execution rounds
+        # re-anchor preview payloads to an old fill.
+        if current_action in {'hold', 'state_update', None} or runtime_mode == 'FROZEN' or is_flat_on_exchange or is_terminal_current_result:
             return output
         return {
             **output,
@@ -3213,6 +3220,167 @@ def _build_runtime_components(config: BinanceEnvConfig):
     state_store = JsonStateStore(state_path, initial_state)
 
     readonly_client = BinanceReadOnlyClient(config, recv_window_ms=config.recv_window_ms)
+    state_before_bootstrap = state_store.load_state()
+    startup_now = datetime.now(timezone.utc)
+    startup_iso = startup_now.isoformat()
+    startup_display_bj = startup_now.astimezone(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S')
+    startup_account = readonly_client.get_account_snapshot()
+    startup_position = readonly_client.get_position_snapshot(config.symbol)
+    startup_open_orders = readonly_client.get_open_orders(config.symbol)
+    startup_snapshot = snapshot_protective_orders(startup_open_orders)
+    has_position = startup_position.side in {'long', 'short'} and float(startup_position.qty or 0.0) > 0.0
+    has_take_profit = startup_snapshot.take_profit is not None
+    inferred_strategy = _infer_startup_active_strategy(
+        previous_strategy=state_before_bootstrap.active_strategy,
+        has_take_profit=has_take_profit,
+        has_position=has_position,
+    )
+    bootstrap_updates = {
+        'state_ts': startup_iso,
+        'account_equity': startup_account.account_equity,
+        'available_margin': startup_account.available_margin,
+        'exchange_position_side': startup_position.side,
+        'exchange_position_qty': startup_position.qty,
+        'exchange_entry_price': startup_position.entry_price,
+        'consistency_status': 'OK',
+        'freeze_reason': None,
+        'runtime_mode': 'ACTIVE',
+        'freeze_status': 'NONE',
+        'pending_execution_phase': None,
+        'pending_execution_block_reason': None,
+        'position_confirmation_level': 'NONE',
+        'trade_confirmation_level': 'NONE',
+        'needs_trade_reconciliation': False,
+        'fills_reconciled': False,
+        'exchange_protective_orders': startup_snapshot.orders,
+        'protective_order_status': 'ACTIVE' if startup_snapshot.orders else 'NONE',
+        'protective_phase_status': 'ACTIVE' if startup_snapshot.orders else 'NONE',
+        'protective_order_last_sync_ts': startup_iso,
+        'protective_order_last_sync_action': 'startup_rebuild',
+        'protective_order_freeze_reason': None,
+        'last_recover_at': startup_iso,
+        'last_recover_result': 'RECOVERED',
+        'recover_attempt_count': int(state_before_bootstrap.recover_attempt_count or 0) + 1,
+        'recover_check': {
+            'checked_at': startup_iso,
+            'source': 'exchange_startup_rebuild',
+            'result': 'RECOVERED',
+            'allowed': True,
+            'reason': 'startup_exchange_rebuild',
+            'runtime_mode': 'ACTIVE',
+            'consistency_status': 'OK',
+            'recover_ready': True,
+            'requires_manual_resume': False,
+            'recover_policy': 'exchange_rebuild',
+            'recover_stage': 'startup_exchange_rebuild',
+        },
+    }
+    if has_position:
+        previous_entry_price = state_before_bootstrap.strategy_entry_price or state_before_bootstrap.execution_entry_price or startup_position.entry_price
+        previous_stop_price = state_before_bootstrap.stop_price
+        previous_qty = float(state_before_bootstrap.base_quantity or state_before_bootstrap.execution_quantity or startup_position.qty or 0.0)
+        derived_hold_bars = int(state_before_bootstrap.hold_bars or 0)
+        derived_equity_at_entry = state_before_bootstrap.equity_at_entry
+        derived_high_water_r = state_before_bootstrap.high_water_r
+        derived_execution_high_water_r = state_before_bootstrap.execution_high_water_r
+        derived_p1_armed = bool(state_before_bootstrap.p1_armed)
+        derived_p2_armed = bool(state_before_bootstrap.p2_armed)
+        if state_before_bootstrap.strategy_entry_time:
+            try:
+                server_now_ms = readonly_client.get_server_time_ms()
+                closed_5m = readonly_client.get_klines(
+                    config.symbol,
+                    interval='5m',
+                    start_time_ms=int(datetime.fromisoformat(state_before_bootstrap.strategy_entry_time).timestamp() * 1000),
+                    end_time_ms=server_now_ms,
+                    limit=500,
+                )
+                derived_hold_bars = sum(1 for bar in closed_5m if getattr(bar, 'is_closed', False) and bar.close_time_iso > state_before_bootstrap.strategy_entry_time)
+                if previous_entry_price is not None and previous_stop_price is not None:
+                    risk_per_unit_boot = abs(float(previous_entry_price) - float(previous_stop_price))
+                    if risk_per_unit_boot > 0:
+                        if startup_position.side == 'short':
+                            observed_rs = [
+                                (float(previous_entry_price) - float(bar.close_price)) / risk_per_unit_boot
+                                for bar in closed_5m if getattr(bar, 'is_closed', False)
+                            ]
+                        else:
+                            observed_rs = [
+                                (float(bar.close_price) - float(previous_entry_price)) / risk_per_unit_boot
+                                for bar in closed_5m if getattr(bar, 'is_closed', False)
+                            ]
+                        if observed_rs:
+                            max_r = max(observed_rs)
+                            derived_high_water_r = max(float(state_before_bootstrap.high_water_r or 0.0), max_r)
+                            derived_execution_high_water_r = max(float(state_before_bootstrap.execution_high_water_r or 0.0), max_r)
+                            if max_r >= float(state_before_bootstrap.p2_trigger_r or 2.0):
+                                derived_p1_armed = True
+                                derived_p2_armed = True
+                            elif max_r >= float(state_before_bootstrap.p1_trigger_r or 1.0):
+                                derived_p1_armed = True
+                if derived_equity_at_entry is None and startup_account.account_equity is not None and previous_qty > 0 and startup_position.unrealized_pnl is not None:
+                    derived_equity_at_entry = float(startup_account.account_equity) - float(startup_position.unrealized_pnl)
+            except Exception:
+                pass
+        bootstrap_updates.update({
+            'active_strategy': inferred_strategy,
+            'active_side': startup_position.side,
+            'base_quantity': previous_qty if previous_qty > 0 else startup_position.qty,
+            'execution_quantity': previous_qty if previous_qty > 0 else startup_position.qty,
+            'strategy_entry_price': previous_entry_price,
+            'execution_entry_price': state_before_bootstrap.execution_entry_price or previous_entry_price,
+            'strategy_ref_entry_price': state_before_bootstrap.strategy_ref_entry_price or previous_entry_price,
+            'hold_bars': derived_hold_bars,
+            'equity_at_entry': derived_equity_at_entry,
+            'high_water_r': float(derived_high_water_r or 0.0),
+            'execution_high_water_r': float(derived_execution_high_water_r or 0.0),
+            'p1_armed': derived_p1_armed,
+            'p2_armed': derived_p2_armed,
+            'can_open_new_position': False,
+            'can_modify_position': True,
+        })
+    else:
+        bootstrap_updates.update(build_flat_reset_state_updates(
+            state=state_before_bootstrap,
+            state_ts=startup_iso,
+            account_equity=startup_account.account_equity,
+            available_margin=startup_account.available_margin,
+        ))
+        bootstrap_updates.update({
+            'protective_order_last_sync_action': 'startup_rebuild',
+            'recover_check': {
+                'checked_at': startup_iso,
+                'source': 'exchange_startup_rebuild',
+                'result': 'RECOVERED',
+                'allowed': True,
+                'reason': 'startup_exchange_rebuild',
+                'runtime_mode': 'ACTIVE',
+                'consistency_status': 'OK',
+                'recover_ready': True,
+                'requires_manual_resume': False,
+                'recover_policy': 'exchange_rebuild',
+                'recover_stage': 'startup_exchange_rebuild',
+            },
+        })
+    next_state = replace(state_before_bootstrap)
+    for key, value in bootstrap_updates.items():
+        if hasattr(next_state, key):
+            setattr(next_state, key, value)
+    state_store.save_state(next_state)
+
+    startup_rebuild_summary = {
+        'state_ts': startup_iso,
+        'display_ts_bj': startup_display_bj,
+        'symbol': config.symbol,
+        'rebuild_result': 'position_rebuilt_from_exchange' if has_position else 'flat_ready_from_exchange',
+        'exchange_position_side': next_state.exchange_position_side,
+        'exchange_position_qty': next_state.exchange_position_qty,
+        'exchange_entry_price': next_state.exchange_entry_price,
+        'protective_order_count': len(startup_snapshot.orders),
+        'runtime_mode': next_state.runtime_mode,
+        'consistency_status': next_state.consistency_status,
+    }
+
     market_provider = BinanceReadOnlyMarketDataProvider(readonly_client)
     strategy_module = build_strategy_adapter_from_config(config)
     executor_module = BinanceRealExecutor(config=config, readonly_client=readonly_client)
@@ -3238,6 +3406,8 @@ def _build_runtime_components(config: BinanceEnvConfig):
             'requested': config.strategy_adapter,
         },
     }
+    runtime_worker.startup_rebuild_summary = startup_rebuild_summary
+    runtime_worker._send_startup_rebuild_notice(startup_rebuild_summary)
     return runtime_worker
 
 
