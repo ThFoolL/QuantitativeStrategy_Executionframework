@@ -662,6 +662,22 @@ class DiscordPublisher:
         result: ExecutionResult,
         payload_kind: str | None,
     ) -> str:
+        trade_summary = result.trade_summary or {}
+        if payload_kind == 'execution_confirmation':
+            exchange_order_ids = [str(item) for item in (result.exchange_order_ids or []) if item not in {None, ''}]
+            order_requests = [str(item) for item in (trade_summary.get('order_requests') or []) if item not in {None, ''}]
+            raw = {
+                'kind': payload_kind,
+                'symbol': market.symbol,
+                'action_type': result.action_type,
+                'confirmation_status': result.confirmation_status,
+                'confirmed_order_status': result.confirmed_order_status,
+                'exchange_order_ids': sorted(exchange_order_ids),
+                'order_requests': sorted(order_requests),
+            }
+            digest = sha256(str(raw).encode('utf-8')).hexdigest()[:16]
+            identity_tag = 'exchange' if exchange_order_ids else ('request' if order_requests else 'bar')
+            return f"discord:{market.symbol}:{identity_tag}:{payload_kind}:{digest}"
         raw = {
             'kind': payload_kind,
             'symbol': market.symbol,

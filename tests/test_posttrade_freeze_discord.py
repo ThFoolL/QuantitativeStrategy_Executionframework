@@ -284,6 +284,33 @@ class PostTradeFreezeDiscordCase(unittest.TestCase):
         self.assertIn('动作: open', payload.content)
         self.assertEqual(payload.metadata['kind'], 'execution_confirmation')
 
+    def test_execution_confirmation_idempotency_key_ignores_bar_when_exchange_order_same(self) -> None:
+        result = self.make_confirmed_result()
+        result.confirmation_status = 'POSITION_CONFIRMED'
+        result.execution_phase = 'entry_confirmed_pending_protective'
+        result.confirmed_order_status = 'FILLED'
+        result.action_type = 'open'
+        result.exchange_order_ids = ['8389766182121393416']
+        result.trade_summary = dict(result.trade_summary or {})
+        result.trade_summary['confirmation_category'] = 'position_confirmed'
+        result.trade_summary['order_requests'] = ['202605180945000000-open']
+        publisher = DiscordPublisher('DISCORD_CHANNEL_ID_PLACEHOLDER')
+        state = self.make_state(
+            active_strategy='trend',
+            active_side='short',
+            exchange_position_side='short',
+            exchange_position_qty=0.372,
+            exchange_entry_price=2116.5,
+            stop_price=2159.3427402324705,
+            tp_price=None,
+        )
+        market1 = self.make_market()
+        market2 = self.make_market()
+        market2.bar_ts = '2026-03-26T12:05:00+00:00'
+        payload1 = publisher.build_execution_confirmation(market=market1, state=state, result=result)
+        payload2 = publisher.build_execution_confirmation(market=market2, state=state, result=result)
+        self.assertEqual(payload1.metadata['idempotency_key'], payload2.metadata['idempotency_key'])
+
     def test_position_confirmed_open_result_without_stop_tp_still_can_build_payload(self) -> None:
         result = self.make_confirmed_result()
         result.confirmation_status = 'POSITION_CONFIRMED'
