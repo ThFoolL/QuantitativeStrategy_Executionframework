@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+DEFAULT_PROTECTIVE_PRICE_TOLERANCE_ABS = 0.1
+DEFAULT_PROTECTIVE_PRICE_TOLERANCE_RATIO = 1e-4
+
 from .binance_readonly import OrderSnapshot
 
 PROTECTIVE_PENDING_STATUSES = {
@@ -263,8 +266,17 @@ def validate_protective_orders(
         if not actual_close_position and abs(actual_qty - intent.quantity) > qty_tolerance:
             notes.append(f'qty_mismatch:{kind}')
         actual_trigger = actual.get('stop_price')
-        if actual_trigger is None or abs(float(actual_trigger) - intent.trigger_price) > price_tolerance:
+        if actual_trigger is None:
             notes.append(f'price_mismatch:{kind}')
+        else:
+            actual_trigger_f = float(actual_trigger)
+            effective_price_tolerance = max(
+                float(price_tolerance or 0.0),
+                DEFAULT_PROTECTIVE_PRICE_TOLERANCE_ABS,
+                abs(float(intent.trigger_price)) * DEFAULT_PROTECTIVE_PRICE_TOLERANCE_RATIO,
+            )
+            if abs(actual_trigger_f - intent.trigger_price) > effective_price_tolerance:
+                notes.append(f'price_mismatch:{kind}')
         status = str(actual.get('status') or '').upper()
         if status not in PROTECTIVE_PENDING_STATUSES:
             notes.append(f'status_invalid:{kind}:{status or "UNKNOWN"}')
