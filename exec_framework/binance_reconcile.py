@@ -369,7 +369,7 @@ def reconcile_pre_run(payload: ReconcileInput) -> ReconcileDecision:
             status=RECONCILE_OK,
             freeze_reason=partial_protective_missing_reason,
             can_open_new_position=False,
-            can_modify_position=False,
+            can_modify_position=True,
             local_position_side=local_side,
             local_position_qty=local_qty,
             exchange_position_side=exchange_side,
