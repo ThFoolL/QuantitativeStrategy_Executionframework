@@ -463,7 +463,75 @@ class PostTradeConfirmClassificationCase(unittest.TestCase):
         self.assertIn('filled_qty_pending_trade_rows_after_flatten', confirmation.notes)
         self.assertIn('position_confirmed_without_trade_rows', confirmation.notes)
 
-    def test_rejected_order_keeps_terminal_rejected_classification(self) -> None:
+    def test_order_lookup_missing_but_position_present_with_deferred_protection_becomes_position_confirmed(self) -> None:
+        class StubReadOnlyOrderMissingButPositionPresent(StubReadOnlyFilledNoTrades):
+            def get_order(self, *, symbol=None, order_id=None, client_order_id=None):
+                raise RuntimeError('{"kind":"http_error","path":"/fapi/v1/order","status":400,"payload":{"code":-2013,"msg":"Order does not exist."}}')
+
+            def get_position_snapshot(self, symbol=None):
+                return type(
+                    'Pos',
+                    (),
+                    {
+                        'symbol': symbol or 'ETHUSDT',
+                        'side': 'short',
+                        'qty': 0.732,
+                        'entry_price': 2207.16,
+                        'break_even_price': None,
+                        'mark_price': None,
+                        'unrealized_pnl': None,
+                        'leverage': None,
+                        'margin_type': None,
+                        'position_side_mode': 'one_way',
+                        'raw': {},
+                    },
+                )()
+
+        confirmer = BinancePostTradeConfirmer(StubReadOnlyOrderMissingButPositionPresent())
+        confirmation = confirmer.confirm(
+            market=self.make_market(),
+            order_requests=[
+                BinanceOrderRequest(
+                    symbol='ETHUSDT',
+                    side='SELL',
+                    order_type='MARKET',
+                    quantity=0.732,
+                    reduce_only=False,
+                    position_side=None,
+                    client_order_id='cid-order-missing-position-present',
+                    metadata={
+                        'strategy': 'trend',
+                        'protective_order': False,
+                    },
+                ),
+                BinanceOrderRequest(
+                    symbol='ETHUSDT',
+                    side='BUY',
+                    order_type='STOP_MARKET',
+                    quantity=None,
+                    reduce_only=True,
+                    position_side=None,
+                    client_order_id='cid-protective-missing-position-present',
+                    stop_price=2277.66,
+                    close_position=True,
+                    metadata={
+                        'protective_order': True,
+                        'algo_order': True,
+                        'protective_kind': 'hard_stop',
+                    },
+                ),
+            ],
+            simulated_receipts=[
+                SimulatedExecutionReceipt(client_order_id='cid-order-missing-position-present', exchange_order_id='3001', acknowledged=True),
+                SimulatedExecutionReceipt(client_order_id='cid-protective-missing-position-present', exchange_order_id='3002', acknowledged=True, metadata={'protective_order': True, 'algo_order': True}),
+            ],
+        )
+        self.assertEqual(confirmation.confirmation_status, 'POSITION_CONFIRMED')
+        self.assertEqual(confirmation.confirmation_category, 'position_confirmed')
+        self.assertFalse(confirmation.should_freeze)
+        self.assertIsNone(confirmation.freeze_reason)
+        self.assertIn('position_confirmed_without_trade_rows', confirmation.notes)
+        self.assertIn('primary_order_lookup_missing_but_position_confirmed', confirmation.notes)
         confirmer = BinancePostTradeConfirmer(StubReadOnlyRejectedOrder())
         confirmation = confirmer.confirm(
             market=self.make_market(),

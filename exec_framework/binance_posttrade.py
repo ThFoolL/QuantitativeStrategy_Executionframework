@@ -734,7 +734,27 @@ class BinancePostTradeConfirmer:
                 should_freeze = True
                 freeze_reason = freeze_reason or 'posttrade_pending_confirmation'
         elif query_failed:
-            if (position_resolution.position_confirmed or protective_position_preserved) and (protective_ok or protective_phase_deferred or protective_pending_confirm):
+            can_fallback_position_confirm = bool(
+                order_lookup_missing_only
+                and not requested_reduce_only
+                and post_position.side in {'long', 'short'}
+                and float(post_position.qty or 0.0) > 0.0
+                and not position_resolution.open_orders_conflict
+                and executed_qty <= 0
+                and len(primary_fills) <= 0
+                and (protective_ok or protective_phase_deferred or protective_pending_confirm or not protective_order_requested)
+            )
+            if can_fallback_position_confirm:
+                confirmation_status = 'POSITION_CONFIRMED'
+                confirmation_category = CONFIRM_CATEGORY_POSITION_CONFIRMED
+                reconcile_status = RECONCILE_OK if (protective_ok or protective_phase_deferred or not protective_order_requested) else RECONCILE_PENDING
+                should_freeze = False
+                freeze_reason = None
+                notes.append('position_confirmed_without_trade_rows')
+                notes.append('primary_order_lookup_missing_but_position_confirmed')
+                if protective_pending_confirm:
+                    notes.append('protective_orders_pending_exchange_confirm')
+            elif (position_resolution.position_confirmed or protective_position_preserved) and (protective_ok or protective_phase_deferred or protective_pending_confirm):
                 confirmation_status = 'POSITION_CONFIRMED'
                 confirmation_category = CONFIRM_CATEGORY_POSITION_CONFIRMED
                 reconcile_status = RECONCILE_OK
@@ -770,7 +790,26 @@ class BinancePostTradeConfirmer:
                 reconcile_status = RECONCILE_OK
                 freeze_reason = None
         else:
-            if protective_pending_confirm and (position_resolution.position_confirmed or protective_position_preserved):
+            can_fallback_position_confirm = bool(
+                order_lookup_missing_only
+                and not requested_reduce_only
+                and position_resolution.position_confirmed
+                and not position_resolution.open_orders_conflict
+                and (protective_ok or protective_phase_deferred or protective_pending_confirm)
+                and executed_qty <= 0
+                and fill_count <= 0
+            )
+            if can_fallback_position_confirm:
+                confirmation_status = 'POSITION_CONFIRMED'
+                confirmation_category = CONFIRM_CATEGORY_POSITION_CONFIRMED
+                reconcile_status = RECONCILE_OK if (protective_ok or protective_phase_deferred) else RECONCILE_PENDING
+                should_freeze = False
+                freeze_reason = None
+                notes.append('position_confirmed_without_trade_rows')
+                if protective_pending_confirm:
+                    notes.append('protective_orders_pending_exchange_confirm')
+                notes.append('primary_order_lookup_missing_but_position_confirmed')
+            elif protective_pending_confirm and (position_resolution.position_confirmed or protective_position_preserved):
                 confirmation_status = 'POSITION_CONFIRMED'
                 confirmation_category = CONFIRM_CATEGORY_POSITION_CONFIRMED
                 reconcile_status = RECONCILE_PENDING
