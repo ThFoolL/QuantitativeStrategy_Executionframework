@@ -229,6 +229,16 @@ class BinancePreRunReconcileModule:
         }
 
 
+def _infer_startup_active_strategy(*, previous_strategy: str | None, has_take_profit: bool, has_position: bool) -> str:
+    if previous_strategy in {'trend', 'rev'}:
+        return str(previous_strategy)
+    if not has_position:
+        return 'none'
+    if has_take_profit:
+        return 'rev'
+    return 'trend'
+
+
 class RuntimeStatusStore:
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -349,6 +359,48 @@ class RuntimeWorker:
         self.event_log_path = self.event_log.path
         self.audit_writer = AuditArtifactWriter(self.runtime_status_path.parent / 'audit_artifacts')
         self.last_runtime_config_validation: dict[str, Any] = {}
+        self.startup_rebuild_summary: dict[str, Any] | None = None
+
+    def _send_startup_rebuild_notice(self, summary: dict[str, Any]) -> dict[str, Any] | None:
+        channel_id = getattr(self.config, 'discord_execution_channel_id', None) or getattr(self.config, 'discord_channel_id', None)
+        if not channel_id:
+            return None
+        sender = MessageToolDiscordSender(
+            channel='discord',
+            real_send_enabled=bool(getattr(self.config, 'discord_real_send_enabled', False)),
+            message_tool_enabled=bool(getattr(self.config, 'discord_message_tool_enabled', False)),
+            require_idempotency=bool(getattr(self.config, 'discord_send_require_idempotency', True)),
+            ledger_path=getattr(self.config, 'discord_send_ledger_path', None),
+            receipt_store_path=getattr(self.config, 'discord_send_receipt_log_path', None),
+            retry_limit=int(getattr(self.config, 'discord_send_retry_limit', 3) or 3),
+            transport=build_discord_transport(getattr(self.config, 'discord_transport', None)),
+            execution_confirmation_real_send_enabled=bool(getattr(self.config, 'discord_execution_confirmation_real_send_enabled', False)),
+        )
+        payload = DiscordMessagePayload(
+            channel_id=str(channel_id),
+            content=(
+                '------------------------------------------------------------\n'
+                '【Runtime重启恢复】\n'
+                f"交易对: {summary.get('symbol')}\n"
+                f"时间(北京时间): {summary.get('display_ts_bj')}\n"
+                f"恢复来源: exchange_startup_rebuild\n"
+                f"重建结果: {summary.get('rebuild_result')}\n"
+                f"交易所持仓方向: {summary.get('exchange_position_side')}\n"
+                f"交易所持仓数量: {summary.get('exchange_position_qty')}\n"
+                f"交易所持仓均价: {summary.get('exchange_entry_price')}\n"
+                f"保护单数量: {summary.get('protective_order_count')}\n"
+                f"本地运行模式: {summary.get('runtime_mode')}\n"
+                f"本地对账状态: {summary.get('consistency_status')}"
+            ),
+            metadata={
+                'kind': 'runtime_restart_rebuild',
+                'sendable': True,
+                'channel_id': str(channel_id),
+                'export_version': 'v1',
+                'idempotency_key': f"discord:{summary.get('symbol')}:{summary.get('state_ts')}:runtime_restart_rebuild",
+            },
+        )
+        return sender.send(payload)
 
     def _strategy_ts_already_processed(self, strategy_ts: str | None) -> bool:
         if not strategy_ts:
