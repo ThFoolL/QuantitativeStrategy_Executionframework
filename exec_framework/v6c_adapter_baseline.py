@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import pandas as pd
+from dataclasses import replace
 
 from .models import FinalActionPlan, LiveStateSnapshot, MarketSnapshot
 
 
 class V6CBaselineLiveAdapter:
     """Runtime adapter aligned with backtest `v6c-baseline`."""
+
+    _SLIPPAGE_RATE = 0.0002
 
     @staticmethod
     def _effective_entry_price(state: LiveStateSnapshot) -> float | None:
@@ -70,19 +73,16 @@ class V6CBaselineLiveAdapter:
         session_tag = self._session_tag(market.bar_ts)
         event_tag = str(getattr(market, 'event_tag', 'NO_EVENT') or 'NO_EVENT')
         structure_tag = str(market.trend_1h.get('structure_tag', 'CHOP'))
-        # Must match strategies/s1_formal_v6c/runtime.py: EVENT_LIVE and CHOP are grade C.
-        # LOW_ACTIVITY is not itself a grade-C condition in baseline; entry is gated separately.
-        if event_tag == 'EVENT_LIVE' or structure_tag == 'CHOP':
+        if event_tag == 'EVENT_LIVE' or session_tag == 'LOW_ACTIVITY' or structure_tag == 'CHOP':
             return 'C'
-        if structure_tag == 'EXPANSION':
+        if session_tag == 'US_CORE' and structure_tag == 'EXPANSION':
             return 'S'
         if structure_tag == 'TREND_CONT':
             return 'A'
         return 'B'
 
     def _manage_trend_position(self, market: MarketSnapshot, state: LiveStateSnapshot) -> FinalActionPlan | None:
-        entry_price_value = self._effective_entry_price(state)
-        if state.active_strategy != 'trend' or not state.active_side or entry_price_value is None or state.stop_price is None:
+        if state.active_strategy != 'trend' or not state.active_side or state.strategy_entry_price is None or state.stop_price is None:
             return None
         if not state.can_modify_position:
             return FinalActionPlan(market.decision_ts, market.bar_ts, 'hold', None, None, 'modify_blocked_by_state', requires_execution=False)
@@ -102,9 +102,11 @@ class V6CBaselineLiveAdapter:
         structure_tag = str(tr.get('structure_tag', 'CHOP'))
         grade = self._trade_grade(market)
 
-        entry_price = entry_price_value
+        entry_price = float(state.strategy_entry_price)
         stop_price = float(state.stop_price)
-        risk_per_unit = self._effective_risk_per_unit(state, stop_price, entry_price)
+        risk_per_unit = float(state.risk_per_unit or 0.0)
+        if risk_per_unit <= 0:
+            risk_per_unit = abs(entry_price - stop_price)
         if risk_per_unit <= 0:
             return FinalActionPlan(market.decision_ts, market.bar_ts, 'hold', None, None, 'invalid_risk_per_unit', requires_execution=False)
 
@@ -115,7 +117,7 @@ class V6CBaselineLiveAdapter:
                 return FinalActionPlan(market.decision_ts, market.bar_ts, 'close', 'trend', 'long', 'trend_fail', qty_mode='full_close', price_hint=close, requires_execution=True)
 
             current_r = (close - entry_price) / risk_per_unit
-            high_water_r = max(self._effective_high_water_r(state), current_r)
+            high_water_r = max(state.high_water_r, current_r)
             elapsed_minutes = (pd.Timestamp(market.bar_ts) - pd.Timestamp(state.strategy_entry_time)).total_seconds() / 60.0 if state.strategy_entry_time else 0.0
             open_impulse_fail = (
                 self._is_us_open_impulse(state.strategy_entry_time or market.bar_ts)
@@ -144,7 +146,7 @@ class V6CBaselineLiveAdapter:
             next_p1_armed = state.p1_armed
             next_p2_armed = state.p2_armed
             pending_reason = 'trend_position_hold_long'
-            base_ctx = {'high_water_r': high_water_r, 'execution_high_water_r': high_water_r}
+            base_ctx = {'high_water_r': high_water_r}
 
             if next_degrade_state == 'ATTACK' and weaken:
                 next_degrade_state = 'HOLD'
@@ -171,7 +173,7 @@ class V6CBaselineLiveAdapter:
                     pending_reason = 'trail_stop_p2'
             base_ctx = {**base_ctx, 'degrade_state': next_degrade_state, 'stop_price': next_stop_price, 'p1_armed': next_p1_armed, 'p2_armed': next_p2_armed}
             defense_base = (state.equity_at_entry or 0.0) * state.profit_defense_start_pct
-            defense_runup = high_water_r * self._effective_risk_amount(state)
+            defense_runup = high_water_r * (state.execution_risk_amount or state.risk_amount or 0.0)
             if defense_runup >= defense_base and current_r <= high_water_r * (1.0 - state.profit_defense_giveback_pct):
                 return FinalActionPlan(market.decision_ts, market.bar_ts, 'close', 'trend', 'long', 'profit_defense_exit', qty_mode='full_close', price_hint=close, requires_execution=True)
             if state.add_on_count > 0 and high_water_r >= 3.0 and current_r <= high_water_r * 0.65:
@@ -179,7 +181,7 @@ class V6CBaselineLiveAdapter:
             add_trigger = state.add_trigger_r_first if state.add_on_count == 0 else state.add_trigger_r_second
             if next_p1_armed and state.quality_bucket == 'HIGH' and state.add_on_count < 2 and current_r >= add_trigger:
                 new_stop = max(next_stop_price, entry_price * (1 + state.break_even_buffer), ema_fast)
-                return FinalActionPlan(market.decision_ts, market.bar_ts, 'add', 'trend', 'long', f'pyramid_add_{state.add_on_count + 1}', qty_mode='risk_based_add', price_hint=close, stop_price=new_stop, risk_fraction=state.risk_fraction, conflict_context=base_ctx, requires_execution=True)
+                return FinalActionPlan(market.decision_ts, market.bar_ts, 'add', 'trend', 'long', f'pyramid_add_{state.add_on_count + 1}', qty_mode='risk_based_add', price_hint=close, stop_price=new_stop, risk_fraction=state.risk_fraction, conflict_context={**base_ctx, 'strategy_ref_entry_price': state.strategy_ref_entry_price, 'strategy_ref_risk_per_unit': state.strategy_ref_risk_per_unit, 'strategy_ref_base_quantity': state.strategy_ref_base_quantity, 'strategy_ref_notional': state.strategy_ref_notional, 'strategy_ref_risk_amount': state.strategy_ref_risk_amount}, requires_execution=True)
             return FinalActionPlan(market.decision_ts, market.bar_ts, 'state_update', 'trend', 'long', pending_reason, conflict_context=base_ctx, requires_execution=False)
 
         if high >= stop_price:
@@ -188,7 +190,28 @@ class V6CBaselineLiveAdapter:
             return FinalActionPlan(market.decision_ts, market.bar_ts, 'close', 'trend', 'short', 'trend_fail', qty_mode='full_close', price_hint=close, requires_execution=True)
 
         current_r = (entry_price - close) / risk_per_unit
-        high_water_r = max(self._effective_high_water_r(state), current_r)
+        high_water_r = max(state.high_water_r, current_r)
+        elapsed_minutes = (pd.Timestamp(market.bar_ts) - pd.Timestamp(state.strategy_entry_time)).total_seconds() / 60.0 if state.strategy_entry_time else 0.0
+        open_impulse_fail = (
+            self._is_us_open_impulse(state.strategy_entry_time or market.bar_ts)
+            and elapsed_minutes <= 30
+            and (
+                current_r <= -0.35
+                or (elapsed_minutes <= 15 and current_r < 0 and close > ema_fast)
+            )
+        )
+        trend_cont_a_early_fail = (
+            state.quality_bucket == 'HIGH'
+            and elapsed_minutes <= 30
+            and structure_tag == 'TREND_CONT'
+            and grade == 'A'
+            and (
+                current_r <= -0.35
+                or (elapsed_minutes >= 15 and high_water_r < 0.30 and close > ema_fast)
+            )
+        )
+        if open_impulse_fail or trend_cont_a_early_fail:
+            return FinalActionPlan(market.decision_ts, market.bar_ts, 'close', 'trend', 'short', 'open_impulse_early_fail', qty_mode='full_close', price_hint=close, requires_execution=True)
         weaken = (structure_tag == 'TREND_CONT' and grade in {'A', 'B'}) or (grade == 'C' and adx >= 18)
         severe = structure_tag == 'CHOP' or close > ema_slow or (grade == 'C' and adx < 18)
         next_degrade_state = state.degrade_state
@@ -196,7 +219,7 @@ class V6CBaselineLiveAdapter:
         next_p1_armed = state.p1_armed
         next_p2_armed = state.p2_armed
         pending_reason = 'trend_position_hold_short'
-        base_ctx = {'high_water_r': high_water_r, 'execution_high_water_r': high_water_r}
+        base_ctx = {'high_water_r': high_water_r}
 
         if next_degrade_state == 'ATTACK' and weaken:
             next_degrade_state = 'HOLD'
@@ -223,7 +246,7 @@ class V6CBaselineLiveAdapter:
                 pending_reason = 'trail_stop_p2'
         base_ctx = {**base_ctx, 'degrade_state': next_degrade_state, 'stop_price': next_stop_price, 'p1_armed': next_p1_armed, 'p2_armed': next_p2_armed}
         defense_base = (state.equity_at_entry or 0.0) * state.profit_defense_start_pct
-        defense_runup = high_water_r * self._effective_risk_amount(state)
+        defense_runup = high_water_r * (state.execution_risk_amount or state.risk_amount or 0.0)
         if defense_runup >= defense_base and current_r <= high_water_r * (1.0 - state.profit_defense_giveback_pct):
             return FinalActionPlan(market.decision_ts, market.bar_ts, 'close', 'trend', 'short', 'profit_defense_exit', qty_mode='full_close', price_hint=close, requires_execution=True)
         if state.add_on_count > 0 and high_water_r >= 3.0 and current_r <= high_water_r * 0.65:
@@ -231,11 +254,11 @@ class V6CBaselineLiveAdapter:
         add_trigger = state.add_trigger_r_first if state.add_on_count == 0 else state.add_trigger_r_second
         if next_p1_armed and state.quality_bucket == 'HIGH' and state.add_on_count < 2 and current_r >= add_trigger:
             new_stop = min(next_stop_price, entry_price * (1 - state.break_even_buffer), ema_fast)
-            return FinalActionPlan(market.decision_ts, market.bar_ts, 'add', 'trend', 'short', f'pyramid_add_{state.add_on_count + 1}', qty_mode='risk_based_add', price_hint=close, stop_price=new_stop, risk_fraction=state.risk_fraction, conflict_context=base_ctx, requires_execution=True)
+            return FinalActionPlan(market.decision_ts, market.bar_ts, 'add', 'trend', 'short', f'pyramid_add_{state.add_on_count + 1}', qty_mode='risk_based_add', price_hint=close, stop_price=new_stop, risk_fraction=state.risk_fraction, conflict_context={**base_ctx, 'strategy_ref_entry_price': state.strategy_ref_entry_price, 'strategy_ref_risk_per_unit': state.strategy_ref_risk_per_unit, 'strategy_ref_base_quantity': state.strategy_ref_base_quantity, 'strategy_ref_notional': state.strategy_ref_notional, 'strategy_ref_risk_amount': state.strategy_ref_risk_amount}, requires_execution=True)
         return FinalActionPlan(market.decision_ts, market.bar_ts, 'state_update', 'trend', 'short', pending_reason, conflict_context=base_ctx, requires_execution=False)
 
     def _manage_rev_position(self, market: MarketSnapshot, state: LiveStateSnapshot) -> FinalActionPlan | None:
-        if state.active_strategy != 'rev' or not state.active_side or self._effective_entry_price(state) is None or state.stop_price is None or state.tp_price is None:
+        if state.active_strategy != 'rev' or not state.active_side or state.strategy_entry_price is None or state.stop_price is None or state.tp_price is None:
             return None
         if not state.can_modify_position:
             return FinalActionPlan(market.decision_ts, market.bar_ts, 'hold', None, None, 'modify_blocked_by_state', requires_execution=False)
@@ -296,9 +319,6 @@ class V6CBaselineLiveAdapter:
         signal_ts = market.signal_15m_ts or market.bar_ts
         session_tag = self._session_tag(market.bar_ts)
         event_tag = str(getattr(market, 'event_tag', 'NO_EVENT') or 'NO_EVENT')
-        grade = self._trade_grade(market)
-        if grade == 'C':
-            return FinalActionPlan(market.decision_ts, market.bar_ts, 'hold', None, None, 'grade_c_block', requires_execution=False)
         if session_tag == 'LOW_ACTIVITY' and not self._allow_low_activity_trend_entry():
             return FinalActionPlan(market.decision_ts, market.bar_ts, 'hold', None, None, 'low_activity_block', requires_execution=False)
         if event_tag == 'EVENT_LIVE':
@@ -309,10 +329,6 @@ class V6CBaselineLiveAdapter:
         prev2, prev, current = hist[-3], hist[-2], hist[-1]
         swing_low = min(x['low'] for x in hist[:-1])
         swing_high = max(x['high'] for x in hist[:-1])
-        required_trend_fields = ('close', 'ema_fast', 'ema_slow', 'adx', 'atr_rank')
-        if any(tr.get(field) in (None, '') for field in required_trend_fields):
-            return FinalActionPlan(market.decision_ts, market.bar_ts, 'hold', None, None, 'trend_features_incomplete', requires_execution=False)
-
         close = float(sig['close'])
         trend_close = float(tr['close'])
         ema_fast = float(tr['ema_fast'])
@@ -336,11 +352,7 @@ class V6CBaselineLiveAdapter:
             if breakout_follow or pullback_follow:
                 risk_fraction = state.risk_fraction_extreme if (long_expansion_bias and session_tag == 'US_CORE' and atr_rank >= 0.7 and adx >= 26 and breakout_follow) else (state.risk_fraction_high if (long_trend_cont_bias and pullback_follow) else state.risk_fraction_medium)
                 stop_anchor = min(float(swing_low), float(ema_fast * (1 - 0.007)))
-                stop_price = float(stop_anchor * (1 - 0.0002))
-                if close - stop_price <= 0:
-                    return FinalActionPlan(market.decision_ts, market.bar_ts, 'hold', None, None, 'invalid_trend_long_risk', requires_execution=False)
-                entry_price = float(close * (1 + 0.0002))
-                return FinalActionPlan(market.decision_ts, market.bar_ts, 'open', 'trend', 'long', 'trend_long_entry', qty_mode='risk_based', price_hint=entry_price, stop_price=stop_price, risk_fraction=risk_fraction, conflict_context={'signal_ts': signal_ts}, requires_execution=True)
+                return FinalActionPlan(market.decision_ts, market.bar_ts, 'open', 'trend', 'long', 'trend_long_entry', qty_mode='risk_based', price_hint=close * (1 + self._SLIPPAGE_RATE), stop_price=stop_anchor * (1 - self._SLIPPAGE_RATE), risk_fraction=risk_fraction, conflict_context={'signal_ts': signal_ts}, requires_execution=True)
 
         if short_expansion_bias or short_trend_cont_bias:
             recent_push = hist[-4]['close'] > hist[-3]['close'] > hist[-2]['close']
@@ -359,20 +371,29 @@ class V6CBaselineLiveAdapter:
                 risk_fraction = state.risk_fraction_extreme if (short_expansion_bias and atr_rank >= 0.65 and adx >= 24 and breakout_follow) else (state.risk_fraction_high if (short_trend_cont_bias and pullback_follow) else state.risk_fraction_medium)
                 risk_fraction *= 0.8
                 stop_anchor = max(float(swing_high), float(ema_fast * (1 + 0.007)))
-                stop_price = float(stop_anchor * (1 + 0.0002))
-                if stop_price - close <= 0:
-                    return FinalActionPlan(market.decision_ts, market.bar_ts, 'hold', None, None, 'invalid_trend_short_risk', requires_execution=False)
-                entry_price = float(close * (1 - 0.0002))
-                return FinalActionPlan(market.decision_ts, market.bar_ts, 'open', 'trend', 'short', 'trend_short_entry', qty_mode='risk_based', price_hint=entry_price, stop_price=stop_price, risk_fraction=risk_fraction, conflict_context={'signal_ts': signal_ts}, requires_execution=True)
+                return FinalActionPlan(market.decision_ts, market.bar_ts, 'open', 'trend', 'short', 'trend_short_entry', qty_mode='risk_based', price_hint=close * (1 - self._SLIPPAGE_RATE), stop_price=stop_anchor * (1 + self._SLIPPAGE_RATE), risk_fraction=risk_fraction, conflict_context={'signal_ts': signal_ts}, requires_execution=True)
 
         return FinalActionPlan(market.decision_ts, market.bar_ts, 'hold', None, None, 'no_supported_trend_signal', requires_execution=False)
 
-    def _plan_rev_entry(self, market: MarketSnapshot, state: LiveStateSnapshot) -> FinalActionPlan:
+    def _plan_rev_entry(self, market: MarketSnapshot, state: LiveStateSnapshot, *, only_at_current_bar: bool = False) -> FinalActionPlan:
         cand = market.rev_candidate
         if not cand:
             return FinalActionPlan(market.decision_ts, market.bar_ts, 'hold', None, None, 'no_rev_candidate', requires_execution=False)
-        cand_ts = str(cand.get('ts') or '')
-        if state.last_rev_signal_ts is not None and cand_ts and cand_ts == state.last_rev_signal_ts:
+        signal_ts = str(cand.get('ts') or market.bar_ts)
+        if only_at_current_bar and pd.Timestamp(signal_ts) != pd.Timestamp(market.bar_ts):
+            return FinalActionPlan(market.decision_ts, market.bar_ts, 'hold', None, None, 'stale_rev_candidate_after_close', requires_execution=False)
+        if (not only_at_current_bar) and pd.Timestamp(signal_ts) != pd.Timestamp(market.bar_ts):
+            return FinalActionPlan(
+                market.decision_ts,
+                market.bar_ts,
+                'state_update',
+                'rev',
+                None,
+                'consume_stale_rev_candidate',
+                conflict_context={'last_rev_signal_ts': signal_ts},
+                requires_execution=False,
+            )
+        if state.last_rev_signal_ts is not None and signal_ts == state.last_rev_signal_ts:
             return FinalActionPlan(market.decision_ts, market.bar_ts, 'hold', None, None, 'duplicate_rev_signal_ts', requires_execution=False)
         side = str(cand['side'])
         entry = float(cand['entry'])
@@ -380,8 +401,7 @@ class V6CBaselineLiveAdapter:
         risk_per_unit = abs(entry - stop)
         if risk_per_unit <= 0:
             return FinalActionPlan(market.decision_ts, market.bar_ts, 'hold', None, None, 'invalid_rev_candidate', requires_execution=False)
-        value_window = int(cand.get('value_window_15m', 24))
-        risk_fraction = 0.10 if value_window == 48 else (0.08 if value_window == 32 else 0.06)
+        risk_fraction = 0.10 if int(cand.get('value_window_15m', 24)) == 24 else 0.05
         tp_price = entry + risk_per_unit if side == 'long' else entry - risk_per_unit
         return FinalActionPlan(
             market.decision_ts,
@@ -394,7 +414,7 @@ class V6CBaselineLiveAdapter:
             price_hint=entry,
             stop_price=stop,
             risk_fraction=risk_fraction,
-            conflict_context={'tp_price': tp_price, 'rev_window': value_window, 'rev_signal_ts': cand_ts or None},
+            conflict_context={'tp_price': tp_price, 'rev_window': int(cand.get('value_window_15m', 24)), 'signal_ts': signal_ts},
             requires_execution=True,
         )
 
@@ -419,6 +439,8 @@ class V6CBaselineLiveAdapter:
             return trend_plan
         if rev_plan.action_type == 'open':
             return rev_plan
+        if trend_plan.reason in {'low_activity_block', 'event_live_block'}:
+            return trend_plan
         return trend_plan if trend_plan.action_type != 'hold' else rev_plan
 
     def build_plan_debug(self, *, market: MarketSnapshot, state: LiveStateSnapshot, final_plan: FinalActionPlan) -> dict[str, object]:
@@ -494,6 +516,34 @@ class V6CBaselineLiveAdapter:
                         requires_execution=True,
                         close_reason='conflict_flip_to_rev',
                     )
+            if trend_manage and trend_manage.action_type == 'close' and state.can_open_new_position:
+                flat_state = replace(
+                    state,
+                    active_strategy='none',
+                    active_side=None,
+                    strategy_entry_time=None,
+                    strategy_entry_price=None,
+                    stop_price=None,
+                    risk_fraction=None,
+                )
+                trend_reentry = self._plan_trend_entry(market, flat_state)
+                if trend_reentry.action_type == 'open':
+                    return FinalActionPlan(
+                        trend_reentry.plan_ts,
+                        trend_reentry.bar_ts,
+                        'flip',
+                        'trend',
+                        trend_reentry.target_side,
+                        f"{trend_manage.reason}_reopen",
+                        qty_mode=trend_reentry.qty_mode,
+                        qty=trend_reentry.qty,
+                        price_hint=trend_reentry.price_hint,
+                        stop_price=trend_reentry.stop_price,
+                        risk_fraction=trend_reentry.risk_fraction,
+                        conflict_context=trend_reentry.conflict_context,
+                        requires_execution=True,
+                        close_reason=trend_manage.reason,
+                    )
             if trend_manage:
                 return trend_manage
             return FinalActionPlan(market.decision_ts, market.bar_ts, 'hold', None, None, 'trend_management_fallback', requires_execution=False)
@@ -519,25 +569,6 @@ class V6CBaselineLiveAdapter:
                         conflict_context=trend_entry.conflict_context,
                         requires_execution=True,
                         close_reason=close_reason,
-                    )
-            if rev_manage and rev_manage.action_type == 'close' and state.can_open_new_position:
-                same_bar_rev_entry = self._plan_rev_entry(market, state)
-                if same_bar_rev_entry.action_type == 'open':
-                    return FinalActionPlan(
-                        same_bar_rev_entry.plan_ts,
-                        same_bar_rev_entry.bar_ts,
-                        'flip',
-                        'rev',
-                        same_bar_rev_entry.target_side,
-                        'same_bar_rev_reopen',
-                        qty_mode=same_bar_rev_entry.qty_mode,
-                        qty=same_bar_rev_entry.qty,
-                        price_hint=same_bar_rev_entry.price_hint,
-                        stop_price=same_bar_rev_entry.stop_price,
-                        risk_fraction=same_bar_rev_entry.risk_fraction,
-                        conflict_context=same_bar_rev_entry.conflict_context,
-                        requires_execution=True,
-                        close_reason=rev_manage.reason,
                     )
             if rev_manage:
                 return rev_manage

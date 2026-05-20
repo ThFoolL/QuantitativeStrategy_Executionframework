@@ -7,7 +7,7 @@ from exec_framework.v6c_adapter_baseline import V6CBaselineLiveAdapter
 
 
 class BaselineShortOpenImpulseParityCase(unittest.TestCase):
-    def test_short_does_not_exit_via_open_impulse_early_fail(self) -> None:
+    def test_short_exits_via_live_baseline_open_impulse_early_fail(self) -> None:
         adapter = V6CBaselineLiveAdapter()
         state = LiveStateSnapshot(
             state_ts='2026-02-11T17:00:00+00:00',
@@ -61,8 +61,8 @@ class BaselineShortOpenImpulseParityCase(unittest.TestCase):
 
         plan = adapter._manage_trend_position(market, state)
         self.assertIsNotNone(plan)
-        self.assertNotEqual(plan.reason, 'open_impulse_early_fail')
-        self.assertEqual(plan.action_type, 'state_update')
+        self.assertEqual(plan.reason, 'open_impulse_early_fail')
+        self.assertEqual(plan.action_type, 'close')
 
 
 if __name__ == '__main__':

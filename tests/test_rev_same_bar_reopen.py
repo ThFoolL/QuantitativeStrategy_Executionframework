@@ -7,7 +7,7 @@ from exec_framework.v6c_adapter_baseline import V6CBaselineLiveAdapter
 
 
 class RevSameBarReopenCase(unittest.TestCase):
-    def test_same_bar_tp_close_then_reopen_rev(self) -> None:
+    def test_same_bar_tp_close_does_not_reopen_rev_in_live_baseline(self) -> None:
         adapter = V6CBaselineLiveAdapter()
         state = LiveStateSnapshot(
             state_ts='2025-08-31T11:10:00+00:00',
@@ -67,11 +67,10 @@ class RevSameBarReopenCase(unittest.TestCase):
         )
 
         plan = adapter.plan(market, state)
-        self.assertEqual(plan.action_type, 'flip')
+        self.assertEqual(plan.action_type, 'close')
         self.assertEqual(plan.target_strategy, 'rev')
-        self.assertEqual(plan.target_side, 'long')
-        self.assertEqual(plan.close_reason, 'tp1_hit')
-        self.assertEqual(plan.reason, 'same_bar_rev_reopen')
+        self.assertEqual(plan.target_side, 'short')
+        self.assertEqual(plan.reason, 'tp1_hit')
 
 
 if __name__ == '__main__':

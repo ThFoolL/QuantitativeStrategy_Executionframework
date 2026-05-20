@@ -4,6 +4,7 @@ from .models import ExecutionResult, FinalActionPlan, LiveStateSnapshot, MarketS
 
 
 DEFAULT_LEVERAGE = 20.0
+DEFAULT_SLIPPAGE_RATE = 0.0002
 # Only local strategy/control fields may flow from plan context into persisted state.
 STATE_UPDATE_WHITELIST = {
     'signal_ts',
@@ -88,9 +89,19 @@ class MockExecutorModule:
             quality_bucket = 'HIGH' if (plan.risk_fraction or 0.0) >= 0.16 else 'MEDIUM'
             signal_ts = (plan.conflict_context or {}).get('signal_ts')
             equity_at_entry = float((plan.conflict_context or {}).get('equity_at_entry', state.account_equity))
+            risk_reference_price = None
+            if market.signal_15m and market.signal_15m.get('close') is not None:
+                risk_reference_price = float(market.signal_15m['close'])
+            elif plan.price_hint is not None:
+                if plan.target_side == 'long':
+                    risk_reference_price = float(plan.price_hint) / (1 + DEFAULT_SLIPPAGE_RATE)
+                elif plan.target_side == 'short':
+                    risk_reference_price = float(plan.price_hint) / (1 - DEFAULT_SLIPPAGE_RATE)
+                else:
+                    risk_reference_price = float(plan.price_hint)
             risk_per_unit = None
-            if plan.price_hint is not None and plan.stop_price is not None:
-                risk_per_unit = abs(float(plan.price_hint) - float(plan.stop_price))
+            if risk_reference_price is not None and plan.stop_price is not None:
+                risk_per_unit = abs(risk_reference_price - float(plan.stop_price))
             risk_fraction = float(plan.risk_fraction or 0.0)
             risk_budget = equity_at_entry * risk_fraction
             quantity = 0.0
@@ -100,7 +111,9 @@ class MockExecutorModule:
                 notional = min(quantity * float(plan.price_hint), equity_at_entry * DEFAULT_LEVERAGE)
                 quantity = notional / max(float(plan.price_hint), 1e-12)
                 risk_amount = risk_per_unit * quantity
-            execution_notional = quantity * float(plan.price_hint) if (plan.price_hint is not None and quantity > 0) else None
+            strategy_ref_entry_price = float(plan.price_hint) if plan.price_hint is not None else None
+            strategy_ref_base_quantity = quantity
+            strategy_ref_notional = quantity * float(plan.price_hint) if plan.price_hint is not None else 0.0
             updates.update({
                 'tp_price': None,
                 'hold_bars': 0,
@@ -115,15 +128,15 @@ class MockExecutorModule:
                 'p1_armed': False,
                 'p2_armed': False,
                 'high_water_r': 0.0,
-                'strategy_ref_entry_price': plan.price_hint,
+                'strategy_ref_entry_price': strategy_ref_entry_price,
                 'strategy_ref_risk_per_unit': risk_per_unit,
-                'strategy_ref_base_quantity': quantity,
-                'strategy_ref_notional': execution_notional,
+                'strategy_ref_base_quantity': strategy_ref_base_quantity,
+                'strategy_ref_notional': strategy_ref_notional,
                 'strategy_ref_risk_amount': risk_amount,
-                'execution_entry_price': plan.price_hint,
+                'execution_entry_price': strategy_ref_entry_price,
                 'execution_risk_per_unit': risk_per_unit,
                 'execution_quantity': quantity,
-                'execution_notional': execution_notional,
+                'execution_notional': strategy_ref_notional,
                 'execution_risk_amount': risk_amount,
                 'execution_high_water_r': 0.0,
                 'last_trend_signal_ts': signal_ts,

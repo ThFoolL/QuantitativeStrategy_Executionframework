@@ -77,7 +77,7 @@ class BaselineStrategySemanticAlignmentCase(unittest.TestCase):
 
     def test_rev_risk_fraction_matches_baseline_window_mapping(self) -> None:
         adapter = V6CBaselineLiveAdapter()
-        for window, expected in [(24, 0.06), (32, 0.08), (48, 0.10)]:
+        for window, expected in [(24, 0.10), (32, 0.05), (48, 0.05)]:
             market = _market(
                 rev_candidate={
                     'side': 'long',
@@ -93,7 +93,7 @@ class BaselineStrategySemanticAlignmentCase(unittest.TestCase):
             self.assertAlmostEqual(plan.risk_fraction or 0.0, expected)
             self.assertEqual(plan.conflict_context.get('rev_window'), window)
 
-    def test_duplicate_rev_signal_ts_is_blocked_after_first_consumption(self) -> None:
+    def test_duplicate_rev_signal_ts_blocks_live_baseline_rev_entry(self) -> None:
         adapter = V6CBaselineLiveAdapter()
         market = _market(
             rev_candidate={
@@ -119,11 +119,29 @@ class BaselineStrategySemanticAlignmentCase(unittest.TestCase):
         self.assertAlmostEqual(plan.price_hint or 0.0, 102.0 * 1.0002)
         self.assertAlmostEqual(plan.stop_price or 0.0, min(97.0, 100.0 * (1 - 0.007)) * (1 - 0.0002))
 
-    def test_event_live_blocks_trend_entry_like_baseline_grade_c_gate(self) -> None:
+    def test_event_live_blocks_trend_entry_like_live_baseline_event_gate(self) -> None:
         adapter = V6CBaselineLiveAdapter()
         plan = adapter._plan_trend_entry(_market(event_tag='EVENT_LIVE'), _state())
         self.assertEqual(plan.action_type, 'hold')
-        self.assertEqual(plan.reason, 'grade_c_block')
+        self.assertEqual(plan.reason, 'event_live_block')
+
+    def test_trend_close_reentry_ignores_unknown_state_attrs(self) -> None:
+        adapter = V6CBaselineLiveAdapter()
+        state = _state(
+            active_strategy='trend',
+            active_side='long',
+            strategy_entry_time='2026-05-12T12:00:00+00:00',
+            strategy_entry_price=100.0,
+            stop_price=95.0,
+            risk_fraction=0.1,
+            high_water_r=3.0,
+            p1_armed=True,
+            p2_armed=True,
+            can_open_new_position=True,
+        )
+        setattr(state, 'signal_ts', '2026-05-12T13:00:00+00:00')
+        plan = adapter.plan(_market(), state)
+        self.assertIn(plan.action_type, {'close', 'flip', 'hold', 'state_update'})
 
 
 if __name__ == '__main__':

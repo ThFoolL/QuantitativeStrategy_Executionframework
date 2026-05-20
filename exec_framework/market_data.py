@@ -32,6 +32,7 @@ class MarketFrameBundle:
     trend_1h: dict[str, Any]
     trend_1h_ts: str | None
     signal_15m_history: list[dict[str, Any]]
+    fast_5m_history: list[dict[str, Any]] | None = None
     rev_candidate: dict[str, Any] | None = None
     event_tag: str = 'NO_EVENT'
     source_status: str = 'OK'
@@ -91,6 +92,12 @@ class StubMarketDataProvider:
             },
             trend_1h_ts=trend_ts,
             signal_15m_history=history,
+            fast_5m_history=[
+                {'open': 1990.0, 'high': 1992.0, 'low': 1988.0, 'close': 1990.0},
+                {'open': 1995.0, 'high': 1997.0, 'low': 1993.0, 'close': 1995.0},
+                {'open': 1998.0, 'high': 2000.0, 'low': 1996.0, 'close': 1998.0},
+                {'open': 2000.0, 'high': 2001.0, 'low': 1999.0, 'close': 2000.0},
+            ],
             rev_candidate=None,
             source_status=self.source_status,
             metadata={'provider': 'stub', 'strategy_ts': strategy_ts},
@@ -164,6 +171,7 @@ class BinanceReadOnlyMarketDataProvider:
             trend_1h=trend_features['values'],
             trend_1h_ts=self._bar_close_iso(trend_bar.close_time_ms),
             signal_15m_history=[self._kline_to_signal_history_dict(item) for item in signal_history_bars],
+            fast_5m_history=[self._kline_to_ohlcv_dict(item) for item in fast_closed_bars[-48:]],
             rev_candidate=rev_candidate,
             event_tag='NO_EVENT',
             source_status=source_status,
@@ -361,7 +369,7 @@ def build_market_snapshot(
         preclose_offset_seconds=preclose_offset_seconds,
     )
     bundle = provider.load(symbol=symbol, decision_time=decision_time)
-    return MarketSnapshot(
+    market = MarketSnapshot(
         decision_ts=semantics.decision_ts,
         bar_ts=semantics.strategy_ts,
         strategy_ts=semantics.strategy_ts,
@@ -379,3 +387,6 @@ def build_market_snapshot(
         rev_candidate=bundle.rev_candidate,
         event_tag=bundle.event_tag,
     )
+    if bundle.fast_5m_history:
+        setattr(market, 'fast_5m_history', list(bundle.fast_5m_history))
+    return market

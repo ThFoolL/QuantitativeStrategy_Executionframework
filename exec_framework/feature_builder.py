@@ -19,6 +19,8 @@ class LiveFeatureConfig:
     range_lookback: int = 12
     rev_windows_15m: tuple[int, ...] = (24, 32, 48)
     rev_band_buffer_frac: float = 0.2
+    wr_lookback_bars: int = 48
+    wr_atr_window: int = 14
 
 
 class LiveFeatureBuilder:
@@ -69,6 +71,7 @@ class LiveFeatureBuilder:
         featured = self._compute_trend_features(trend_df)
         current = featured.iloc[-1]
         structure_tag = self._classify_structure(featured)
+        wide_range = self._build_wide_range_features(featured)
         return {
             'ema_fast': self._clean_float(current.get('ema_fast')),
             'ema_slow': self._clean_float(current.get('ema_slow')),
@@ -76,6 +79,7 @@ class LiveFeatureBuilder:
             'atr_rank': self._clean_float(current.get('atr_rank')),
             'structure_tag': structure_tag,
             'feature_status': 'ready' if self._trend_row_ready(current) else 'insufficient_trend_bars',
+            **wide_range,
         }
 
     def build_rev_candidate(self, *, symbol: str, signal_bars: list[Any], trend_bars: list[Any]) -> dict[str, Any] | None:
@@ -340,6 +344,36 @@ class LiveFeatureBuilder:
         if row['atr_rank'] <= 0.3 and row['bbw_rank'] <= 0.3 and row['range_rank'] <= 0.3 and row['adx'] < 20:
             return 'COMPRESSION'
         return 'CHOP'
+
+    def _build_wide_range_features(self, trend_df: pd.DataFrame) -> dict[str, Any]:
+        cfg = self.config
+        if trend_df.empty or len(trend_df) < cfg.wr_lookback_bars:
+            return {}
+        window = trend_df.tail(cfg.wr_lookback_bars)
+        high = pd.to_numeric(window['high'], errors='coerce')
+        low = pd.to_numeric(window['low'], errors='coerce')
+        close = pd.to_numeric(window['close'], errors='coerce')
+        if high.isna().any() or low.isna().any() or close.isna().any():
+            return {}
+        rolling_high = float(high.max())
+        rolling_low = float(low.min())
+        box_width = rolling_high - rolling_low
+        if box_width <= 0:
+            return {}
+        atr_series = pd.to_numeric(trend_df['atr'], errors='coerce')
+        atr = float(atr_series.iloc[-1]) if len(atr_series) >= cfg.wr_atr_window and pd.notna(atr_series.iloc[-1]) else None
+        if atr is None or atr <= 0:
+            return {}
+        close_now = float(close.iloc[-1])
+        close_start = float(close.iloc[0])
+        return {
+            'wr_box_width_atr': box_width / atr,
+            'wr_trend_efficiency': abs(close_now - close_start) / box_width,
+            'wr_box_width': box_width,
+            'wr_atr': atr,
+            'wr_rolling_high': rolling_high,
+            'wr_rolling_low': rolling_low,
+        }
 
     @staticmethod
     def _trend_row_ready(row: pd.Series) -> bool:
