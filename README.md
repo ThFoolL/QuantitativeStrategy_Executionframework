@@ -1,52 +1,54 @@
 # QuantitativeStrategy Execution Framework
 
-Reusable execution-layer framework extracted from a private trading system.
+A public, strategy-agnostic execution framework extracted from a private trading runtime.
 
-## What this repository is
+This repository is intentionally **not** a complete trading system. It provides reusable execution-layer components that a caller-owned strategy/runtime can import and wire together.
 
-This repository is meant to look and behave like a standalone execution framework, not a strategy repository copy.
-It keeps only the generic runtime pieces needed to:
+## Scope
 
-- load environment and runtime state
-- read exchange state through readonly adapters
-- submit orders behind explicit guardrails
-- classify post-trade confirmation outcomes
-- persist execution state and operator-facing status
-- prepare Discord notifications through a guarded sender bridge
+This public repository contains:
 
-## What this repository does not include
+- execution data models and engine contracts
+- local state persistence helpers
+- runtime environment and guard helpers
+- Binance readonly / submit / reconcile / post-trade helpers
+- protective-order and position-fact reconciliation helpers
+- Discord notification payload/sender bridge utilities
+- systemd service template examples
+- public, strategy-neutral tests for the reusable execution layer
 
-The following stay outside this public repository:
+## Out of scope
 
-- strategy algorithms and alpha logic
-- strategy-specific adapters and orchestration entrypoints
-- private rollout notes and deployment handoff bundles
-- runtime outputs, temporary files, and local secrets
-- private incident samples or environment-specific channel IDs
+The following belong in the caller/private runtime and are deliberately not included here:
+
+- strategy signal generation, alpha logic, and strategy-specific adapters
+- runtime worker / orchestration wiring
+- market-data and feature-building pipelines
+- rollout notes, incident samples, handoff records, and operator runbooks
+- runtime output directories, dispatch previews, receipts, account snapshots, and local state
+- real deployment paths, channel IDs, account-specific configuration, and secrets
 
 ## Repository layout
 
-- `exec_framework/`: reusable Python package for execution/runtime primitives
-- `tests/`: public unit tests and minimal in-file sample scenarios
-- `deploy/systemd/`: generic service template example
-- `docs/`: repository boundary and extraction notes
+- `exec_framework/` — reusable execution-layer package
+- `tests/` — public tests for the reusable execution-layer surface
+- `deploy/systemd/` — generic service template examples
+- `docs/` — public/private boundary and extraction guidance
+- `runtime/` — ignored local runtime output directory, not part of the public export
 
-## Packaging
+## Integration model
 
-This repository ships as a small Python package via `pyproject.toml`.
-The package is intentionally lightweight and does not bundle a strategy worker entrypoint.
+A private or downstream runtime should provide its own orchestration layer, for example:
 
-## Sample defaults
+- strategy adapter: converts caller-owned strategy output into `FinalActionPlan`
+- market provider: converts caller-owned market/feature data into `MarketSnapshot`
+- runtime worker: wires strategy, market provider, `LiveEngine`, persistence, and notification hooks
 
-- `BTCUSDT` is used as a neutral sample symbol in tests and CLI examples; override it through env in real deployments.
-- Discord targets, env paths, and transport settings use placeholders or closed-by-default defaults.
+The public framework should be treated as an importable execution package, not as the runtime truth source.
 
-## Private repository relationship
+## Boundary reference
 
-The intended follow-up model is:
+See:
 
-1. private repository keeps strategy logic and runtime worker wiring
-2. public repository provides reusable execution framework modules
-3. private repository imports from this package by path dependency, git submodule/subtree, or later pip packaging
-
-See `docs/public_private_boundary.md` for the concrete boundary.
+- `docs/public_private_boundary.md`
+- `docs/public_extraction_notes.md`

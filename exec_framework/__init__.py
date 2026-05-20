@@ -1,1 +1,1 @@
-"""v6c live execution framework."""
+"""Strategy-agnostic public execution framework."""
