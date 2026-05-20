@@ -7,7 +7,7 @@
 - private 策略仓负责 runtime 真相源与日常开发
 - public 仓负责从 private runtime 中剥离、整理、发布可外放部分
 
-当前 public 仓仍处于过渡期，仓内还保留了一部分历史直接开发阶段留下的 runtime wiring 与 strategy-coupled 内容；后续需要继续清理，而不是再把它当成主开发现场。
+当前 public 仓已经按方向开始清理：strategy-coupled adapter、runtime worker、市场数据拼装以及对应测试会逐步从 public 面剥离，只保留可外放的 execution-layer framework。
 
 ## Public 仓应包含
 

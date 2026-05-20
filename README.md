@@ -6,11 +6,7 @@ Public-facing execution/runtime repository derived from a private trading runtim
 
 This repository is **currently a transition-stage public/export repository**.
 
-It still contains a mixture of:
-
-- reusable execution framework modules
-- runtime wiring that historically lived here before the private strategy repository became the runtime truth-source
-- strategy-coupled adapters and runtime-facing tests that will be pruned or reorganized in later cleanup passes
+It currently contains a transition-stage public/export surface focused on reusable execution-layer modules, while strategy wiring and runtime truth-source development are being moved and kept in the private strategy repository.
 
 So at this moment, this repository should **not** be interpreted as a perfectly cleaned standalone framework package.
 It is better understood as:
@@ -32,17 +28,12 @@ At the moment, the repository includes:
 - execution/runtime core modules
 - Binance readonly / submit / reconcile / post-trade helpers
 - runtime guard, runtime env, runtime status, sender bridge
-- some runtime wiring and strategy-coupled adapters retained from the earlier direct-development phase
-- tests and examples that still reflect that transition-stage reality
+- tests and examples for those reusable execution-layer capabilities
 
 ## What should not be inferred from the current layout
 
-The current presence of runtime worker or strategy-coupled files does **not** mean this repository is the long-term runtime truth-source.
-Those contents are transitional and will later be either:
-
-- removed from public,
-- split into release-safe subsets, or
-- re-documented as export-only runtime scaffolding.
+The repository should not be interpreted as the long-term runtime truth-source.
+The private strategy repository keeps the real runtime code and strategy wiring; this public repository keeps only the externalizable execution-layer framework surface.
 
 ## Repository layout
 
