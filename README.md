@@ -1,52 +1,61 @@
 # QuantitativeStrategy Execution Framework
 
-Reusable execution-layer framework extracted from a private trading system.
+Public-facing execution/runtime repository derived from a private trading runtime.
 
-## What this repository is
+## Current repository status
 
-This repository is meant to look and behave like a standalone execution framework, not a strategy repository copy.
-It keeps only the generic runtime pieces needed to:
+This repository is **currently a transition-stage public/export repository**.
 
-- load environment and runtime state
-- read exchange state through readonly adapters
-- submit orders behind explicit guardrails
-- classify post-trade confirmation outcomes
-- persist execution state and operator-facing status
-- prepare Discord notifications through a guarded sender bridge
+It still contains a mixture of:
 
-## What this repository does not include
+- reusable execution framework modules
+- runtime wiring that historically lived here before the private strategy repository became the runtime truth-source
+- strategy-coupled adapters and runtime-facing tests that will be pruned or reorganized in later cleanup passes
 
-The following stay outside this public repository:
+So at this moment, this repository should **not** be interpreted as a perfectly cleaned standalone framework package.
+It is better understood as:
 
-- strategy algorithms and alpha logic
-- strategy-specific adapters and orchestration entrypoints
-- private rollout notes and deployment handoff bundles
-- runtime outputs, temporary files, and local secrets
-- private incident samples or environment-specific channel IDs
+> a public/export snapshot that will be further cleaned as the private strategy repository becomes the primary runtime development source.
+
+## Target direction
+
+The intended steady-state model is:
+
+1. the **private strategy repository** keeps the runtime truth-source and day-to-day runtime development
+2. this **public repository** receives only the parts that are suitable for external release
+3. public updates are prepared as curated release-style exports, not as the primary development surface
+
+## What this repository currently contains
+
+At the moment, the repository includes:
+
+- execution/runtime core modules
+- Binance readonly / submit / reconcile / post-trade helpers
+- runtime guard, runtime env, runtime status, sender bridge
+- some runtime wiring and strategy-coupled adapters retained from the earlier direct-development phase
+- tests and examples that still reflect that transition-stage reality
+
+## What should not be inferred from the current layout
+
+The current presence of runtime worker or strategy-coupled files does **not** mean this repository is the long-term runtime truth-source.
+Those contents are transitional and will later be either:
+
+- removed from public,
+- split into release-safe subsets, or
+- re-documented as export-only runtime scaffolding.
 
 ## Repository layout
 
-- `exec_framework/`: reusable Python package for execution/runtime primitives
-- `tests/`: public unit tests and minimal in-file sample scenarios
-- `deploy/systemd/`: generic service template example
-- `docs/`: repository boundary and extraction notes
+- `exec_framework/`: current public/export code surface
+- `tests/`: current public/export test surface
+- `deploy/systemd/`: service templates/examples
+- `docs/`: boundary notes and extraction guidance
+- `runtime/`: local runtime state/output directory, ignored from git
 
 ## Packaging
 
-This repository ships as a small Python package via `pyproject.toml`.
-The package is intentionally lightweight and does not bundle a strategy worker entrypoint.
+This repository ships as a Python package via `pyproject.toml`, but the current repository contents should still be treated as a transition-stage export surface rather than a fully finalized standalone framework product.
 
-## Sample defaults
+## Boundary reference
 
-- `BTCUSDT` is used as a neutral sample symbol in tests and CLI examples; override it through env in real deployments.
-- Discord targets, env paths, and transport settings use placeholders or closed-by-default defaults.
-
-## Private repository relationship
-
-The intended follow-up model is:
-
-1. private repository keeps strategy logic and runtime worker wiring
-2. public repository provides reusable execution framework modules
-3. private repository imports from this package by path dependency, git submodule/subtree, or later pip packaging
-
-See `docs/public_private_boundary.md` for the concrete boundary.
+See `docs/public_private_boundary.md` and `docs/public_extraction_notes.md` for the intended long-term split between private runtime truth-source and public release/export content.

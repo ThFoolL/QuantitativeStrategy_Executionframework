@@ -2,7 +2,12 @@
 
 ## 结论
 
-后续推荐采用“public 提供 execution framework，private 负责 strategy 与运行编排”的双仓结构。
+后续采用“双仓主从结构”:
+
+- private 策略仓负责 runtime 真相源与日常开发
+- public 仓负责从 private runtime 中剥离、整理、发布可外放部分
+
+当前 public 仓仍处于过渡期，仓内还保留了一部分历史直接开发阶段留下的 runtime wiring 与 strategy-coupled 内容；后续需要继续清理，而不是再把它当成主开发现场。
 
 ## Public 仓应包含
 
