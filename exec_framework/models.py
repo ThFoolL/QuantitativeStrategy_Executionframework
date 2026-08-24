@@ -15,6 +15,7 @@ class MarketSnapshot:
     current_price: float
     source_status: str
     fast_5m: Dict[str, Any] = field(default_factory=dict)
+    fast_5m_history: List[Dict[str, Any]] = field(default_factory=list)
     signal_15m: Dict[str, Any] = field(default_factory=dict)
     signal_15m_ts: Optional[str] = None
     trend_1h: Dict[str, Any] = field(default_factory=dict)
